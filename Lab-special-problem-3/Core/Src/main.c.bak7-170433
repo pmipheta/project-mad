@@ -1,0 +1,916 @@
+/* ============================================================================
+ * main.c  —  Oscilloscope Display Module  (Full Feature Mockup)
+ *
+ * Board   : STM32F767ZIT6 (Nucleo-F767ZI)
+ * Display : ILI9341 320x240 TFT via SPI5
+ * Driver  : martnak/STM32-ILI9341
+ *
+ * SCREEN LAYOUT (landscape 320x240)
+ * ┌────────────────────────────────────────────────────────────────────┐
+ * │ Row1 y=1  : [V/div] [T/div] [TrigMode] [Status]          (size 1) │
+ * │ Row2 y=10 : [Vpp]   [Freq]  [Vmax]    [Vmin]   [RMS]    (size 1) │
+ * │ ────────────────────────────── y=18 separator ──────────────────── │
+ * │ y=19..239 : Waveform area (221 px, ~5.5 grid divisions)           │
+ * └────────────────────────────────────────────────────────────────────┘
+ *
+ * BUTTONS  (configure the 4 macros below to match actual wiring)
+ *   BTN_UP   — V/div increase (short) | T/div increase (after SET toggle)
+ *   BTN_DOWN — V/div decrease
+ *   BTN_HOLD — freeze / un-freeze  |  reset SINGLE capture
+ *   BTN_SET  — short: cycle trigger mode (AUTO→SINGLE→NORM)
+ *              long (2 s): Auto Scale
+ *
+ * MERGE WITH SAMPLING TEAMMATE
+ *   1. Remove GenerateFakeSineWave() and its call inside while(1).
+ *   2. Teammate fills raw_samples[N_SAMPLES] (0-4095) and sets new_frame_ready=1.
+ *   3. Teammate fills osc_meas (vmax, vmin, vpp, vrms, freq).
+ *   4. Integration point is clearly marked in the while(1) block.
+ * ============================================================================
+ */
+
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "i2c.h"
+#include "rng.h"
+#include "spi.h"
+#include "tim.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* USER CODE BEGIN Includes */
+#include "ILI9341_STM32_Driver.h"
+#include "ILI9341_GFX.h"
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+/* USER CODE END Includes */
+
+/* USER CODE BEGIN PD */
+
+/* ===== CONFIGURE BUTTONS — change port/pin to match your wiring ===========
+ * Wire momentary buttons between pin and GND.
+ * Set GPIO mode = Input, Pull = Pull-up in CubeMX (active LOW when pressed).
+ * =========================================================================== */
+#define BTN_UP_PORT     GPIOB
+#define BTN_UP_PIN      GPIO_PIN_0    /* TODO: set to actual pin */
+#define BTN_DOWN_PORT   GPIOB
+#define BTN_DOWN_PIN    GPIO_PIN_1    /* TODO: set to actual pin */
+#define BTN_HOLD_PORT   GPIOB
+#define BTN_HOLD_PIN    GPIO_PIN_2    /* TODO: set to actual pin */
+#define BTN_SET_PORT    GPIOB
+#define BTN_SET_PIN     GPIO_PIN_3    /* TODO: set to actual pin */
+
+/* --- Screen geometry ------------------------------------------------------- */
+#define HEADER_H        29           /* top panel height (px)                  */
+#define WAVEFORM_TOP    HEADER_H     /* waveform Y start                       */
+#define SCREEN_W        ILI9341_SCREEN_WIDTH    /* 320                         */
+#define SCREEN_H        ILI9341_SCREEN_HEIGHT   /* 240                         */
+#define CENTER_Y        120          /* waveform vertical midpoint              */
+
+/* --- Grid ------------------------------------------------------------------ */
+#define GRID_Y_STEP     40           /* px between horizontal grid lines        */
+#define GRID_Y_OFFSET   20           /* first grid line Y (just below header)   */
+#define GRID_X_DOT      6            /* horizontal dot spacing                  */
+
+/* --- ADC reference --------------------------------------------------------- */
+#define ADC_MID         2048         /* 12-bit midpoint (= 0 V after bias)     */
+#define ADC_FULL        4095         /* 12-bit full scale                       */
+#define ADC_VREF        3.3f         /* reference voltage (V)                   */
+
+/* --- Sample buffer --------------------------------------------------------- */
+#define N_SAMPLES       240
+
+/* --- Frame timing ---------------------------------------------------------- */
+#define FRAME_MS        33           /* ~30 FPS                                 */
+#define HEADER_MS       300          /* header refresh interval (ms)            */
+#define BTN_DEBOUNCE_MS 200          /* button debounce window                  */
+#define BTN_LONG_MS     2000         /* long-press threshold for auto scale     */
+
+/* --- Debug: แสดง FPS จริงบนจอ (1 = เปิด, 0 = ปิด) --- */
+#define SHOW_FPS        1
+
+/* USER CODE END PD */
+
+/* USER CODE BEGIN PTD */
+
+/* Trigger modes */
+typedef enum { TRIG_AUTO = 0, TRIG_SINGLE, TRIG_NORM } TriggerMode;
+
+/* Measurement values — teammate populates this after each ADC frame */
+typedef struct {
+    float vmax;
+    float vmin;
+    float vpp;
+    float vrms;
+    float freq;
+    float dc_offset;
+} OscMeasure;
+
+/* Button state for debouncing */
+typedef struct {
+    GPIO_TypeDef *port;
+    uint16_t      pin;
+    uint32_t      last_press_tick;  /* tick of last confirmed press            */
+    uint32_t      held_since_tick;  /* tick of when held press began           */
+    uint8_t       is_held;          /* 1 = currently held down                 */
+    uint8_t       long_fired;       /* 1 = long-press action already triggered */
+} Button;
+
+/* USER CODE END PTD */
+
+/* USER CODE BEGIN PV */
+
+/* --- Sample buffer (teammate writes here) ---------------------------------- */
+volatile int16_t raw_samples[N_SAMPLES];  /* ADC counts 0-4095                */
+volatile uint8_t new_frame_ready = 0;     /* teammate sets 1 when buffer ready */
+
+/* --- Measurement results (teammate writes here) ---------------------------- */
+volatile OscMeasure osc_meas = {0};
+
+/* --- Display double-buffer ------------------------------------------------- */
+static int16_t old_y[N_SAMPLES];
+static int16_t new_y[N_SAMPLES];
+
+/* --- Display state --------------------------------------------------------- */
+static const float vdiv_table[] = {0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 5.0f};
+#define VDIV_COUNT  7
+static int   vdiv_idx      = 1;     /* default: 1.0 V/div                     */
+static float volts_per_div = 1.0f;
+
+/* Time/div labels — shown in header; actual timebase is set by teammate's timer */
+static const char *timediv_labels[] = {"0.5ms","1ms","2ms","5ms","10ms","20ms","50ms"};
+#define TDIV_COUNT  7
+static int timediv_idx = 1;         /* default label: 1ms/div                  */
+
+static TriggerMode trigger_mode    = TRIG_AUTO;
+static uint8_t     hold_active     = 0;
+static uint8_t     single_captured = 0;  /* 1 = SINGLE mode has captured frame */
+
+/* --- Cursor ---------------------------------------------------------------- */
+static uint16_t cursor_x = SCREEN_W / 2;  /* vertical cursor at screen centre  */
+/* TODO: add BTN logic to move cursor_x left/right if needed                   */
+
+/* --- Buttons --------------------------------------------------------------- */
+static Button btn_up, btn_down, btn_hold, btn_set;
+
+/* --- Mock sine phase (remove after merge) ---------------------------------- */
+static float mock_phase = 0.0f;
+
+#if SHOW_FPS
+static uint32_t fps_frames = 0, last_fps_tick = 0;
+
+/* globals สำหรับวัดผลจากภายนอก (อ่านผ่าน SWD) — dbg_frames_total เป็น monotonic */
+volatile uint32_t dbg_frames_total = 0;
+volatile uint32_t dbg_fps_x10      = 0;
+volatile uint32_t dbg_uptime_ms    = 0;
+volatile uint32_t dbg_sig_hash     = 0;   /* FNV-1a ของ raw_samples[] เฟรมล่าสุด */
+volatile uint32_t dbg_t0_ms        = 0;   /* tick ของเฟรมล่าสุด */
+
+/* ตัววัดเพื่อหาคอขวด: พิกเซลต่อเฟรม + เวลาที่ใช้ในแต่ละส่วน */
+volatile uint32_t dbg_px_frame = 0;
+volatile uint32_t dbg_wf_ms    = 0;
+volatile uint32_t dbg_hdr_ms   = 0;
+volatile uint32_t dbg_loop_ms  = 0;
+volatile uint32_t dbg_px_last   = 0;    /* px/frame ที่วัดได้เต็มเฟรม */
+volatile uint32_t dbg_b_spi_ms  = 0;    /* 2000 x HAL_SPI_Transmit 2 bytes */
+volatile uint32_t dbg_b_px_ms   = 0;    /* 2000 x ILI9341_Draw_Pixel */
+volatile uint32_t dbg_b_burst_ms= 0;    /* 20 x Draw_Rectangle 300x1 (burst) */
+#endif
+
+/* USER CODE END PV */
+
+/* USER CODE BEGIN PFP */
+static void     GenerateFakeSineWave(void);
+static void     SimSamplingStream(void);
+static void     SimUpdateMeasure(void);
+static float    SimNoise(void);
+static int      FindTrigger(void);
+static void     MapToScreen(int trig_offset);
+static void     DrawGrid(void);
+static void     DrawLineBresenham(int x0, int y0, int x1, int y1, uint16_t color);
+static void     DrawCursor(void);
+static void     DrawWaveform(void);
+static void     DrawTopPanel(void);
+static void     AutoScale(void);
+static uint8_t  ButtonJustPressed(Button *btn, uint32_t now);
+static uint8_t  ButtonLongPress(Button *btn, uint32_t now);
+static void     HandleButtons(uint32_t now);
+#if SHOW_FPS
+static void     DrawFps(float fps);
+#endif
+/* USER CODE END PFP */
+
+/* USER CODE BEGIN 0 */
+
+
+
+/* ==========================================================================
+ * SimSamplingStream — จำลอง ADC ที่ "สุ่มข้อมูลต่อเนื่องตลอดเวลา" (mock)
+ *
+ *   ต่างจาก GenerateFakeSineWave() ตรงที่ของเดิมผูกเฟสกับ "เลขเฟรม"
+ *   (mock_phase += 0.15 ทุกเฟรม) => ภาพซ้ำเป็นลูปทุก ~42 เฟรม เหมือน GIF
+ *
+ *   ตัวนี้ผูกกับ "เวลาจริง": หน้าต่างที่แสดงคือ N_SAMPLES ตัวอย่างที่เวลา
+ *   [t, t + 2.4 ms] โดย t เดินตาม HAL_GetTick() => ทุกเฟรมเป็นข้อมูลชุดใหม่
+ *   ที่ต่อเนื่องกัน และมี noise + แอมพลิจูด/ดีซี/ความถี่ลอยช้า ๆ + โทนที่ 2
+ *   (1370 Hz ไม่ลงตัวกับ 1 kHz) => มองกี่นาทีก็ไม่เห็นภาพเดิมซ้ำ
+ *
+ *   ลบทั้งบล็อกนี้เมื่อทีม sampling ต่อข้อมูลจริงเข้าบัฟเฟอร์
+ * ========================================================================== */
+#define SIM_STREAM_MODE  1          /* 1 = สุ่มต่อเนื่อง (ใหม่) | 0 = sine เดิมที่วนลูป */
+
+#define SIM_FS_HZ        100000.0f  /* สมมติ sample rate 100 kSa/s (หน้าต่าง 2.4 ms) */
+#define SIM_FREQ_HZ      1000.0f    /* ความถี่ตั้งต้นของ function generator          */
+#define SIM_NOISE        0.05f      /* noise floor (±5% ของครึ่งสเกล)                */
+#define SIM_SCALE        0.62f      /* สเกล: 1 หน่วยสัญญาณ -> สัดส่วนของ ADC_MID    */
+#define SIM_T_WRAP       3000.0f    /* วนเวลาสะสมที่ 3000 s (ทุกความถี่ลงตัวพอดี) */
+
+/* โหมดเลื่อนแบบ real-time monitor: รูปคลื่นไถลจากขวาไปซ้าย
+ *   1 = เลื่อน (roll / chart-recorder) | 0 = จัดแนวด้วย trigger เหมือนเดิม */
+#define SIM_ROLL_MODE    1
+#define SIM_PUSH         8          /* sample ใหม่ต่อเฟรม (มาก=เลื่อนเร็ว/เป็นขั้น) */
+
+static float    sim_t    = 0.0f;    /* เวลาจริงสะสม (วินาที)                     */
+static float    sim_ph1  = 0.0f;    /* เฟสสะสมโทนหลัก (rad, 0..2pi)              */
+static float    sim_ph2  = 0.0f;    /* เฟสสะสมโทนที่ 2                            */
+static uint32_t sim_prev = 0;       /* tick ครั้งก่อน                             */
+static uint32_t sim_seed = 0x2545F491u;
+
+/* สัญญาณรบกวนแบบ xorshift32 -> [-1, 1] */
+static float SimNoise(void)
+{
+    sim_seed ^= sim_seed << 13;
+    sim_seed ^= sim_seed >> 17;
+    sim_seed ^= sim_seed << 5;
+    return ((float)((sim_seed >> 9) & 0xFFFFu) / 32768.0f) - 1.0f;
+}
+
+/* ค่าวัดทุกตัวคำนวณจากข้อมูลจริงในบัฟเฟอร์ -> ตัวเลขบนหัวจอตรงกับที่เห็น */
+static void SimUpdateMeasure(void)
+{
+    float vmin = 1e9f, vmax = -1e9f, s1 = 0.0f, s2 = 0.0f, prev = 0.0f;
+    float cross[8];
+    int   ncross = 0;
+    const float k = ADC_VREF / (float)ADC_FULL;
+
+    for (int i = 0; i < N_SAMPLES; i++) {
+        float v = ((float)raw_samples[i] - (float)ADC_MID) * k;
+        if (v > vmax) vmax = v;
+        if (v < vmin) vmin = v;
+        s1 += v;
+        s2 += v * v;
+        if (i > 0 && prev < 0.0f && v >= 0.0f && ncross < 8) {   /* ตัดศูนย์ขึ้น */
+            float f = (v != prev) ? (-prev / (v - prev)) : 0.0f;
+            cross[ncross++] = ((float)i - 1.0f + f) / SIM_FS_HZ;
+        }
+        prev = v;
+    }
+
+    osc_meas.vmax = vmax;
+    osc_meas.vmin = vmin;
+    osc_meas.vpp  = vmax - vmin;
+    osc_meas.vrms = sqrtf(s2 / (float)N_SAMPLES);
+    osc_meas.dc_offset = s1 / (float)N_SAMPLES;
+    if (ncross >= 2) {                                     /* วัดคาบจากจุดตัดศูนย์ */
+        float span = cross[ncross - 1] - cross[0];
+        if (span > 0.0f) osc_meas.freq = (float)(ncross - 1) / span;
+    }
+}
+
+static void SimSamplingStream(void)
+{
+    const float w    = 6.28318531f;
+    const float step = 1.0f / SIM_FS_HZ;                   /* คาบสุ่ม = 10 us */
+    uint32_t    now  = HAL_GetTick();
+    uint32_t    sum  = 2166136261u;                        /* FNV-1a: ตรวจว่าข้อมูลไม่ซ้ำ */
+
+    if (sim_prev == 0) sim_prev = now;
+    float dt = (float)(now - sim_prev) / 1000.0f;   /* เวลาจริงที่ผ่านไป (ใช้กับ drift) */
+    float dtwin = (float)SIM_PUSH / SIM_FS_HZ;      /* เวลาหน้าต่างต่อเฟรม = ตัวคุมความเร็วไถล */
+    sim_prev = now;
+
+    /* เดินเวลาจริง + เฟสสะสม (แบบ fmod กัน float เสียความละเอียด) */
+    sim_t   = fmodf(sim_t + dt, SIM_T_WRAP);
+    float f1 = SIM_FREQ_HZ + 60.0f * sinf(w * 0.23f * sim_t);   /* ความถี่ลอยช้า ๆ */
+    sim_ph1 = fmodf(sim_ph1 + w * f1 * dtwin, w);   /* เฟสเดินตามหน้าต่างที่เลื่อน */
+    sim_ph2 = fmodf(sim_ph2 + w * 1370.0f * dtwin, w);
+
+    float amp = 1.00f + 0.20f * sinf(w * 0.11f * sim_t + 0.7f);  /* แอมพลิจูดหายใจช้า ๆ */
+    float off = 0.15f * sinf(w * 0.07f * sim_t + 1.3f);          /* DC ลอยช้า ๆ        */
+
+    for (int i = 0; i < N_SAMPLES; i++) {
+        float ti = (float)i * step;                        /* เวลาภายในหน้าต่าง */
+        float v  = amp * sinf(sim_ph1 + w * f1 * ti)
+                 + 0.22f * sinf(sim_ph2 + w * 1370.0f * ti) /* โทน 2 ไม่ลงตัวกับ 1 kHz */
+                 + off
+                 + SIM_NOISE * SimNoise();
+        float raw = (float)ADC_MID * (1.0f + SIM_SCALE * v);
+        if (raw < 0.0f)            raw = 0.0f;
+        if (raw > (float)ADC_FULL) raw = (float)ADC_FULL;
+        raw_samples[i] = (int16_t)(raw + 0.5f);
+        sum = (sum ^ (uint32_t)(uint16_t)raw_samples[i]) * 16777619u;
+    }
+
+#if SHOW_FPS
+    dbg_sig_hash = sum;          /* ลายนิ้วมือของเฟรมนี้ (ใช้ตรวจว่าไม่ซ้ำ) */
+    dbg_t0_ms    = now;
+#endif
+    SimUpdateMeasure();
+}
+/* --------------------------------------------------------------------------
+ * GenerateFakeSineWave
+ * TODO: DELETE after merging with sampling teammate.
+ *       Also fills osc_meas with mock values for display testing.
+ * -------------------------------------------------------------------------- */
+static void GenerateFakeSineWave(void)
+{
+    for (int i = 0; i < N_SAMPLES; i++) {
+        float angle = (2.0f * 3.14159265f * (float)i / (float)N_SAMPLES) + mock_phase;
+        raw_samples[i] = (int16_t)((float)ADC_MID + 1800.0f * sinf(angle));
+    }
+    mock_phase += 0.15f;
+    if (mock_phase >= 2.0f * 3.14159265f) mock_phase -= 2.0f * 3.14159265f;
+
+    /* Mock measurements — teammate replaces these with real calculations */
+    float peak_v = 1800.0f * ADC_VREF / (float)ADC_FULL;  /* ~1.45 V */
+    ((OscMeasure *)&osc_meas)->vmax     =  peak_v;
+    ((OscMeasure *)&osc_meas)->vmin     = -peak_v;
+    ((OscMeasure *)&osc_meas)->vpp      =  peak_v * 2.0f;
+    ((OscMeasure *)&osc_meas)->vrms     =  peak_v * 0.7071f;
+    ((OscMeasure *)&osc_meas)->freq     =  1000.0f;
+    ((OscMeasure *)&osc_meas)->dc_offset = 0.0f;
+}
+
+/* --------------------------------------------------------------------------
+ * FindTrigger
+ * Scan raw_samples[] for the first rising edge crossing ADC_MID.
+ * Returns the sample index to start rendering from (trigger offset).
+ * -------------------------------------------------------------------------- */
+static int FindTrigger(void)
+{
+    /* Search only the first 3/4 of the buffer so we always have
+     * enough samples left to fill the screen after the trigger point. */
+    int limit = (N_SAMPLES * 3) / 4;
+    for (int i = 1; i < limit; i++) {
+        if (raw_samples[i - 1] < ADC_MID && raw_samples[i] >= ADC_MID)
+            return i;
+    }
+    return 0;  /* no edge found — start from beginning (AUTO mode fallback) */
+}
+
+/* --------------------------------------------------------------------------
+ * MapToScreen
+ * Convert raw_samples[] to screen Y coordinates, starting from trig_offset.
+ * Physical mapping: each grid division = GRID_Y_STEP px = volts_per_div V.
+ * -------------------------------------------------------------------------- */
+static void MapToScreen(int trig_offset)
+{
+    for (int i = 0; i < N_SAMPLES; i++) {
+        int src = (trig_offset + i);
+        if (src >= N_SAMPLES) src -= N_SAMPLES;  /* wrap around buffer */
+
+        /* Convert count -> voltage -> pixel offset */
+        float v = (float)(raw_samples[src] - ADC_MID) * ADC_VREF / (float)ADC_FULL;
+        int y = CENTER_Y - (int)(v / volts_per_div * (float)GRID_Y_STEP);
+
+        /* Clamp to waveform area only (do not draw over header) */
+        if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
+        if (y >= SCREEN_H)    y = SCREEN_H - 1;
+        new_y[i] = (int16_t)y;
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * DrawGrid
+ * Draw sparse dot-pattern grid once (at startup or after full screen clear).
+ * Grid rows: y = 20, 60, 100, 140, 180, 220 (GRID_Y_OFFSET + n*GRID_Y_STEP)
+ * -------------------------------------------------------------------------- */
+static void DrawGrid(void)
+{
+    for (int y = GRID_Y_OFFSET; y < SCREEN_H; y += GRID_Y_STEP)
+        for (int x = 0; x < SCREEN_W; x += GRID_X_DOT)
+            ILI9341_Draw_Pixel((uint16_t)x, (uint16_t)y, DARKGREY);
+}
+
+/* --------------------------------------------------------------------------
+ * DrawLineBresenham
+ * Rasterise a line. When erasing (color == BLACK):
+ *   - Restore DARKGREY at grid dot positions      (Fix #2)
+ *   - Restore DARKCYAN at cursor column           (cursor preservation)
+ * -------------------------------------------------------------------------- */
+static void DrawLineBresenham(int x0, int y0, int x1, int y1, uint16_t color)
+{
+    int dx  =  abs(x1 - x0);
+    int sx  =  (x0 < x1) ? 1 : -1;
+    int dy  = -abs(y1 - y0);
+    int sy  =  (y0 < y1) ? 1 : -1;
+    int err = dx + dy;
+
+    while (1) {
+        uint16_t draw_color = color;
+
+        if (color == BLACK) {
+            /* Cursor column takes priority over grid */
+            if (x0 == (int)cursor_x && y0 >= WAVEFORM_TOP) {
+                draw_color = DARKCYAN;
+            } else if ((y0 % GRID_Y_STEP == GRID_Y_OFFSET) && (x0 % GRID_X_DOT == 0)) {
+                draw_color = DARKGREY;
+            }
+        }
+
+        ILI9341_Draw_Pixel((uint16_t)x0, (uint16_t)y0, draw_color);
+
+#if SHOW_FPS
+        dbg_px_frame++;
+#endif
+
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * DrawCursor
+ * Draw a solid vertical DARKCYAN line at cursor_x in the waveform area.
+ * Called once at startup and whenever cursor_x changes.
+ * Bresenham's erase pass will preserve this line (see above).
+ * -------------------------------------------------------------------------- */
+static void DrawCursor(void)
+{
+    for (int y = WAVEFORM_TOP; y < SCREEN_H; y++)
+        ILI9341_Draw_Pixel(cursor_x, (uint16_t)y, DARKCYAN);
+}
+
+/* --------------------------------------------------------------------------
+ * DrawWaveform
+ * Erase previous frame (BLACK, preserving grid+cursor), draw new frame (YELLOW).
+ * Fix #1: x = (i * SCREEN_W) / N_SAMPLES  — fills full 320px width.
+ * -------------------------------------------------------------------------- */
+static void DrawWaveform(void)
+{
+    for (int i = 0; i < N_SAMPLES - 1; i++) {
+        int x0 = (i       * SCREEN_W) / N_SAMPLES;  /* Fix #1 */
+        int x1 = ((i + 1) * SCREEN_W) / N_SAMPLES;
+
+        DrawLineBresenham(x0, old_y[i],     x1, old_y[i + 1], BLACK);
+        DrawLineBresenham(x0, new_y[i],     x1, new_y[i + 1], YELLOW);
+    }
+    memcpy(old_y, new_y, sizeof(new_y));
+}
+
+/* --------------------------------------------------------------------------
+ * DrawTopPanel
+ * Render the 2-row header bar and separator line.
+ *
+ * Row 1 (y=1):  V/div | T/div | Trigger mode | Run/Hold status
+ * Row 2 (y=10): Vpp | Freq | Vmax | Vmin | RMS
+ * Separator:    horizontal DARKGREY line at y=18
+ *
+ * Note: ILI9341_Draw_Text takes uint8_t X — all positions below are <= 255.
+ * -------------------------------------------------------------------------- */
+static void DrawTopPanel(void)
+{
+    char buf[20];
+    const char *trig_str[] = {"AUTO", "SNGL", "NORM"};
+
+    /* Clear header area */
+    ILI9341_Draw_Filled_Rectangle_Coord(0, 0, SCREEN_W - 1, HEADER_H - 2, BLACK);
+
+    /* ── Row 1 ──────────────────────────────────────────────────────────── */
+
+    /* V/div — x=2 */
+    snprintf(buf, sizeof(buf), "V:%.1fV/d", (double)volts_per_div);
+    ILI9341_Draw_Text(buf, 2, 1, YELLOW, 1, BLACK);
+
+    /* T/div label — x=72 */
+    snprintf(buf, sizeof(buf), "T:%s/d", timediv_labels[timediv_idx]);
+    ILI9341_Draw_Text(buf, 72, 1, WHITE, 1, BLACK);
+
+    /* Trigger mode — x=148 */
+    snprintf(buf, sizeof(buf), "%s",
+             (trigger_mode == TRIG_SINGLE && single_captured) ? "DONE" : trig_str[trigger_mode]);
+    ILI9341_Draw_Text(buf, 148, 1, CYAN, 1, BLACK);
+
+    /* Run / Hold status — x=210 */
+    if (hold_active) {
+        ILI9341_Draw_Text("HOLD", 210, 1, RED, 1, BLACK);
+    } else if (trigger_mode == TRIG_SINGLE && !single_captured) {
+        ILI9341_Draw_Text("WAIT", 210, 1, ORANGE, 1, BLACK);
+    } else {
+        ILI9341_Draw_Text("RUN ", 210, 1, GREEN, 1, BLACK);
+    }
+
+    /* ── Row 2 ──────────────────────────────────────────────────────────── */
+
+    /* Vpp — x=2 */
+    snprintf(buf, sizeof(buf), "Vp:%.2fV", (double)osc_meas.vpp);
+    ILI9341_Draw_Text(buf, 2, 10, CYAN, 1, BLACK);
+
+    /* Frequency — x=68 */
+    if (osc_meas.freq >= 1000.0f)
+        snprintf(buf, sizeof(buf), "F:%.1fkHz", (double)(osc_meas.freq / 1000.0f));
+    else
+        snprintf(buf, sizeof(buf), "F:%.0fHz",  (double)osc_meas.freq);
+    ILI9341_Draw_Text(buf,72, 10, GREEN, 1, BLACK);
+
+    /* RMS — x=245 (245 < 255, safe for uint8_t) */
+    snprintf(buf, sizeof(buf), "Rs:%.2f", (double)osc_meas.vrms);
+    ILI9341_Draw_Text(buf, 148, 10, LIGHTGREY, 1, BLACK);
+
+    /* Vmax — x=130 */
+    snprintf(buf, sizeof(buf), "Mx:%.2fV", (double)osc_meas.vmax);
+    ILI9341_Draw_Text(buf, 2, 20, LIGHTGREY, 1, BLACK);
+
+    /* Vmin — x=188 */
+    snprintf(buf, sizeof(buf), "Mn:%.2fV", (double)osc_meas.vmin);
+    ILI9341_Draw_Text(buf, 72, 20, LIGHTGREY, 1, BLACK);
+
+//    /* RMS — x=245 (245 < 255, safe for uint8_t) */
+//    snprintf(buf, sizeof(buf), "Rs:%.2f", (double)osc_meas.vrms);
+//    ILI9341_Draw_Text(buf, 2, 20, LIGHTGREY, 1, BLACK);
+
+    /* Separator line */
+    ILI9341_Draw_Horizontal_Line(0, HEADER_H - 1, SCREEN_W, DARKGREY);
+}
+
+/* --------------------------------------------------------------------------
+ * AutoScale
+ * Adjust V/div so the waveform Vpp spans approximately 4 vertical divisions.
+ * Triggered by BTN_SET held for BTN_LONG_MS.
+ * -------------------------------------------------------------------------- */
+static void AutoScale(void)
+{
+    float vpp = osc_meas.vpp;
+    if (vpp < 0.01f) return;    /* no signal — do nothing */
+
+    /* Target: Vpp fits in 4 divisions (leaves headroom at top and bottom) */
+    float ideal = vpp / 4.0f;
+
+    /* Pick the smallest V/div table entry that is >= ideal */
+    for (int i = 0; i < VDIV_COUNT; i++) {
+        if (vdiv_table[i] >= ideal) {
+            vdiv_idx      = i;
+            volts_per_div = vdiv_table[i];
+            return;
+        }
+    }
+    /* Signal too large — use maximum scale */
+    vdiv_idx      = VDIV_COUNT - 1;
+    volts_per_div = vdiv_table[VDIV_COUNT - 1];
+}
+
+/* --------------------------------------------------------------------------
+ * ButtonJustPressed
+ * Returns 1 on the first confirmed press (rising edge with debounce).
+ * Active-LOW buttons: GPIO reads 0 when pressed.
+ * -------------------------------------------------------------------------- */
+static uint8_t ButtonJustPressed(Button *btn, uint32_t now)
+{
+    uint8_t raw = (HAL_GPIO_ReadPin(btn->port, btn->pin) == GPIO_PIN_RESET) ? 1 : 0;
+
+    if (raw) {
+        if (!btn->is_held) {
+            /* Transition to pressed */
+            btn->is_held       = 1;
+            btn->held_since_tick = now;
+            btn->long_fired    = 0;
+            if (now - btn->last_press_tick >= BTN_DEBOUNCE_MS) {
+                btn->last_press_tick = now;
+                return 1;   /* confirmed short press */
+            }
+        }
+    } else {
+        btn->is_held    = 0;
+        btn->long_fired = 0;
+    }
+    return 0;
+}
+
+/* --------------------------------------------------------------------------
+ * ButtonLongPress
+ * Returns 1 once when the button has been held for at least BTN_LONG_MS.
+ * -------------------------------------------------------------------------- */
+static uint8_t ButtonLongPress(Button *btn, uint32_t now)
+{
+    if (btn->is_held && !btn->long_fired) {
+        if (now - btn->held_since_tick >= BTN_LONG_MS) {
+            btn->long_fired = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* --------------------------------------------------------------------------
+ * HandleButtons
+ * Call this every loop iteration (before frame logic).
+ * -------------------------------------------------------------------------- */
+static void HandleButtons(uint32_t now)
+{
+    /* BTN_UP — increase V/div */
+    if (ButtonJustPressed(&btn_up, now)) {
+        if (vdiv_idx < VDIV_COUNT - 1) {
+            vdiv_idx++;
+            volts_per_div = vdiv_table[vdiv_idx];
+        }
+    }
+
+    /* BTN_DOWN — decrease V/div */
+    if (ButtonJustPressed(&btn_down, now)) {
+        if (vdiv_idx > 0) {
+            vdiv_idx--;
+            volts_per_div = vdiv_table[vdiv_idx];
+        }
+    }
+
+    /* BTN_HOLD — toggle freeze / reset single capture */
+    if (ButtonJustPressed(&btn_hold, now)) {
+        if (trigger_mode == TRIG_SINGLE && single_captured) {
+            /* Reset single trigger — arm again */
+            single_captured = 0;
+            hold_active     = 0;
+        } else {
+            hold_active = !hold_active;
+        }
+    }
+
+    /* BTN_SET short press — cycle trigger mode */
+    if (ButtonJustPressed(&btn_set, now)) {
+        trigger_mode    = (TriggerMode)((trigger_mode + 1) % 3);
+        single_captured = 0;
+        hold_active     = 0;
+    }
+
+    /* BTN_SET long press (2 s) — auto scale */
+    if (ButtonLongPress(&btn_set, now)) {
+        AutoScale();
+    }
+}
+
+#if SHOW_FPS
+/* แสดงเฟรมเรตจริง (debug) — ฟอร์แมตกว้างคงที่ เพื่อไม่ให้เลขเดิมค้างบนจอ */
+static void DrawFps(float fps)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%4.1ffps", (double)fps);
+    ILI9341_Draw_Text(buf, 2, SCREEN_H - 12, DARKCYAN, 1, BLACK);
+}
+#endif
+
+/* USER CODE END 0 */
+
+void SystemClock_Config(void);
+
+/* ==========================================================================
+ * main()
+ * ========================================================================== */
+int main(void)
+{
+    /* USER CODE BEGIN 1 */
+    /* USER CODE END 1 */
+
+    SCB_EnableICache();
+    SCB_EnableDCache();
+
+    HAL_Init();
+    SystemClock_Config();
+
+    /* Peripheral init — identical to Core/Src/main.c */
+    MX_GPIO_Init();
+    MX_RNG_Init();
+    MX_SPI5_Init();
+    MX_TIM1_Init();
+    MX_USART3_UART_Init();
+    MX_I2C1_Init();
+
+    /* USER CODE BEGIN 2 */
+
+    /* ปุ่ม PB0..PB3 = input + pull-up
+     * ชั่วคราว: gpio.c ที่ CubeMX generate ยังไม่ได้ config ขาเหล่านี้
+     * ของจริงควรตั้ง GPIO_Input + Pull-up ใน CubeMX แล้ว generate ใหม่     */
+    {
+        GPIO_InitTypeDef btn_init = {0};
+        __HAL_RCC_GPIOB_CLK_ENABLE();
+        btn_init.Pin  = BTN_UP_PIN | BTN_DOWN_PIN | BTN_HOLD_PIN | BTN_SET_PIN;
+        btn_init.Mode = GPIO_MODE_INPUT;
+        btn_init.Pull = GPIO_PULLUP;
+        HAL_GPIO_Init(GPIOB, &btn_init);
+    }
+
+    /* Button struct init (done here to avoid static-initializer cast issue) */
+    btn_up   = (Button){BTN_UP_PORT,   BTN_UP_PIN,   0, 0, 0, 0};
+    btn_down = (Button){BTN_DOWN_PORT, BTN_DOWN_PIN, 0, 0, 0, 0};
+    btn_hold = (Button){BTN_HOLD_PORT, BTN_HOLD_PIN, 0, 0, 0, 0};
+    btn_set  = (Button){BTN_SET_PORT,  BTN_SET_PIN,  0, 0, 0, 0};
+
+    /* LCD init */
+    ILI9341_Init();
+    ILI9341_Set_Rotation(SCREEN_HORIZONTAL_1);
+    ILI9341_Fill_Screen(BLACK);
+
+#if SHOW_FPS
+    /* --- benchmark ครั้งเดียวตอนบูต: วัดต้นทุนต่อพิกเซลของแต่ละวิธี --------- */
+    {
+        uint32_t tb;
+        uint8_t  two[2] = {0xAA, 0x55};
+
+        ILI9341_Draw_Filled_Rectangle_Coord(0, 224, 319, 239, BLACK);
+
+        HAL_GPIO_WritePin(LCD_CS_PORT, LCD_CS_PIN, GPIO_PIN_RESET);
+        tb = HAL_GetTick();
+        for (int i = 0; i < 2000; i++) HAL_SPI_Transmit(&hspi5, two, 2, 1);
+        dbg_b_spi_ms = HAL_GetTick() - tb;
+        HAL_GPIO_WritePin(LCD_CS_PORT, LCD_CS_PIN, GPIO_PIN_SET);
+
+        tb = HAL_GetTick();
+        for (int i = 0; i < 2000; i++) ILI9341_Draw_Pixel(160, 230, YELLOW);
+        dbg_b_px_ms = HAL_GetTick() - tb;
+
+        tb = HAL_GetTick();
+        for (int i = 0; i < 20; i++) ILI9341_Draw_Rectangle(2, 231, 300, 1, YELLOW);
+        dbg_b_burst_ms = HAL_GetTick() - tb;
+
+        ILI9341_Draw_Filled_Rectangle_Coord(0, 224, 319, 239, BLACK);
+        DrawGrid();
+    }
+#endif
+
+    /* Initial double-buffer state */
+    for (int i = 0; i < N_SAMPLES; i++) old_y[i] = CENTER_Y;
+
+    DrawGrid();
+    DrawCursor();
+    DrawTopPanel();
+
+    uint32_t last_frame_tick  = 0;
+    uint32_t last_header_tick = 0;
+
+    /* USER CODE END 2 */
+
+    /* USER CODE BEGIN WHILE */
+    while (1)
+    {
+        /* USER CODE BEGIN 3 */
+
+        uint32_t now = HAL_GetTick();
+
+        /* --- Button handling (every loop) --------------------------------- */
+        HandleButtons(now);
+
+        /* --- Waveform frame update (~30 FPS) ------------------------------ */
+        if (now - last_frame_tick >= FRAME_MS)
+        {
+            last_frame_tick = now;
+
+#if SHOW_FPS
+            {
+                static uint32_t t_prev = 0;
+                dbg_loop_ms = (t_prev == 0) ? 0 : (now - t_prev);
+                t_prev = now;
+            }
+#endif
+
+            /* Determine if we should redraw this frame */
+            uint8_t should_draw = 0;
+            if      (trigger_mode == TRIG_AUTO)   should_draw = !hold_active;
+            else if (trigger_mode == TRIG_NORM)   should_draw = !hold_active;
+            else if (trigger_mode == TRIG_SINGLE) should_draw = (!hold_active && !single_captured);
+
+            if (should_draw)
+            {
+                /* ============================================================
+                 * INTEGRATION POINT — replace everything in this block when merging
+                 * ============================================================
+                 * Current (mockup):
+                 *   GenerateFakeSineWave() fills raw_samples[] + osc_meas.
+                 *
+                 * After merge (teammate's code):
+                 *   if (!new_frame_ready) goto skip_draw;
+                 *   new_frame_ready = 0;
+                 *   (teammate has already filled raw_samples[] and osc_meas)
+                 * ============================================================ */
+                GenerateFakeSineWave();         /* TODO: remove after merge */
+                if (SIM_STREAM_MODE) SimSamplingStream();      /* สุ่มต่อเนื่องตามเวลาจริง */
+                else                 GenerateFakeSineWave();   /* ของเดิม: sine วนลูป */
+
+#if SHOW_FPS
+                dbg_px_frame = 0;
+                uint32_t t_wf0 = HAL_GetTick();
+#endif
+                /* ============================================================ */
+
+                /* roll mode: ไม่จัดแนว trigger => ข้อมูลใหม่เข้าขวา เส้นไถลซ้าย */
+                int trig_offset = SIM_ROLL_MODE ? 0 : FindTrigger();
+                MapToScreen(trig_offset);
+                DrawWaveform();
+
+#if SHOW_FPS
+                dbg_wf_ms = HAL_GetTick() - t_wf0;
+                dbg_px_last = dbg_px_frame;
+#endif
+
+#if SHOW_FPS
+                fps_frames++;          /* นับเฉพาะเฟรมที่วาดจริง */
+                dbg_frames_total++;
+#endif
+
+                /* SINGLE mode: lock after first captured frame */
+                if (trigger_mode == TRIG_SINGLE) {
+                    single_captured = 1;
+                    hold_active     = 1;
+                }
+            }
+            /* skip_draw: */
+        }
+
+        /* --- Header update (every 300 ms) --------------------------------- */
+        if (now - last_header_tick >= HEADER_MS)
+        {
+            last_header_tick = now;
+
+#if SHOW_FPS
+            uint32_t t_h0 = HAL_GetTick();
+#endif
+            DrawTopPanel();
+
+#if SHOW_FPS
+            dbg_hdr_ms = HAL_GetTick() - t_h0;
+#endif
+
+#if SHOW_FPS
+            /* FPS จริงทุก ~500 ms (ผูกกับรอบ refresh header) */
+            if (now - last_fps_tick >= 500)
+            {
+                DrawFps((float)fps_frames * 1000.0f / (float)(now - last_fps_tick));
+                dbg_fps_x10   = (uint32_t)(fps_frames * 10000u / (now - last_fps_tick));
+                dbg_uptime_ms = now;
+                fps_frames    = 0;
+
+                last_fps_tick = now;
+            }
+#endif
+        }
+
+        /* USER CODE END 3 */
+    }
+    /* USER CODE END WHILE */
+}
+
+/* ==========================================================================
+ * SystemClock_Config — identical to Core/Src/main.c
+ * HSE -> PLL: M=8, N=192, P=2 -> SYSCLK = 192 MHz
+ * ========================================================================== */
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState       = RCC_HSE_ON;
+    RCC_OscInitStruct.PLL.PLLState   = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource  = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM       = 8;
+    RCC_OscInitStruct.PLL.PLLN       = 192;
+    RCC_OscInitStruct.PLL.PLLP       = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ       = 9;
+    RCC_OscInitStruct.PLL.PLLR       = 2;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+        Error_Handler();
+
+    RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_HCLK  | RCC_CLOCKTYPE_SYSCLK
+                                     | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
+        Error_Handler();
+}
+
+/* USER CODE BEGIN 4 */
+/* USER CODE END 4 */
+
+void Error_Handler(void)
+{
+    /* USER CODE BEGIN Error_Handler_Debug */
+    __disable_irq();
+    while (1) {}
+    /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+    /* USER CODE BEGIN 6 */
+    (void)file; (void)line;
+    /* USER CODE END 6 */
+}
+#endif
+
+
