@@ -52,7 +52,8 @@
 /* USER CODE BEGIN PV */
 /* USER CODE BEGIN PV */
 /* บัฟเฟอร์รับข้อมูลดิบจาก DMA Multi-Mode */
-ALIGN_32BYTES(uint32_t adc_dma_buffer[DMA_BUFFER_SIZE]);
+ALIGN_32BYTES(uint16_t adc_dma_buffer[DMA_BUFFER_SIZE]);
+
 /* บัฟเฟอร์สำหรับเก็บจุดที่เรียงตามลำดับเวลาและนำไปกรอง */
 uint16_t raw_waveform[DISPLAY_WIDTH];
 uint16_t filtered_waveform[DISPLAY_WIDTH];
@@ -69,6 +70,7 @@ volatile uint16_t *current_processing_ptr = NULL;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MPU_Config(void);
+
 /* USER CODE BEGIN PFP */
 void Apply_MovingAverage(const uint16_t *input, uint16_t *output, uint16_t length, uint8_t window_size);
 void Draw_Oscilloscope_Waveform(const uint16_t *waveform_data, uint16_t length);
@@ -158,9 +160,8 @@ int main(void)
   MX_ADC3_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  HAL_ADC_Start(&hadc3);
-  HAL_ADC_Start(&hadc2);
-  HAL_ADCEx_MultiModeStart_DMA(&hadc1, (uint32_t*)adc_dma_buffer, DMA_BUFFER_SIZE); //[cite: 1]
+  HAL_ADCEx_MultiModeStart_DMA(&hadc1, (uint32_t*)adc_dma_buffer, DMA_BUFFER_SIZE);
+
     // เริ่มต้น Timer TRGO กระตุ้นการ Sampling
   HAL_TIM_Base_Start(&htim2); // เปลี่ยน htim2 เป็นตัวที่เลือกใช้
   /* USER CODE END 2 */
@@ -213,7 +214,7 @@ void SystemClock_Config(void)
   * in the RCC_OscInitTypeDef structure.
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 25;
@@ -249,25 +250,28 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-// เมื่อ DMA แปลงข้อมูลครบครึ่งแรก
+// เมื่อ DMA แปลงข้อมูลครบครึ่งแรก (Half Transfer)
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc)
 {
     if (hadc->Instance == ADC1)
     {
-        SCB_InvalidateDCache_by_Addr((uint32_t *)&adc_dma_buffer[0], (DMA_BUFFER_SIZE / 2) * sizeof(uint32_t));
-        // แปลงกลับเป็น uint16_t* เพื่อให้ลูปใน while(1) ดึงค่าแบบสลับ ADC1, ADC2 ได้ตามปกติ
-        current_processing_ptr = (uint16_t *)&adc_dma_buffer[0];
+        // จัดการ Cache Coherency สำหรับ STM32F7 (ถ้าเปิด D-Cache)
+        SCB_InvalidateDCache_by_Addr((uint32_t *)&adc_dma_buffer[0], (DMA_BUFFER_SIZE / 2) * sizeof(uint16_t));
+
+        current_processing_ptr = &adc_dma_buffer[0];
         buffer_ready_flag = true;
     }
 }
 
-// เมื่อ DMA แปลงข้อมูลครบครึ่งหลัง
+// เมื่อ DMA แปลงข้อมูลครบครึ่งหลัง (Transfer Complete)
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
     if (hadc->Instance == ADC1)
     {
-        SCB_InvalidateDCache_by_Addr((uint32_t *)&adc_dma_buffer[DMA_BUFFER_SIZE / 2], (DMA_BUFFER_SIZE / 2) * sizeof(uint32_t));
-        current_processing_ptr = (uint16_t *)&adc_dma_buffer[DMA_BUFFER_SIZE / 2];
+        // จัดการ Cache Coherency สำหรับ STM32F7 (ถ้าเปิด D-Cache)
+        SCB_InvalidateDCache_by_Addr((uint32_t *)&adc_dma_buffer[DMA_BUFFER_SIZE / 2], (DMA_BUFFER_SIZE / 2) * sizeof(uint16_t));
+
+        current_processing_ptr = &adc_dma_buffer[DMA_BUFFER_SIZE / 2];
         buffer_ready_flag = true;
     }
 }
