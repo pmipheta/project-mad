@@ -53,7 +53,11 @@
  *   สลับค่าเดียวนี้เพื่อกลับไปใช้ simulator ได้ทันที (โค้ดเดิมไม่ถูกแตะ)
  * ========================================================================== */
 #define ADC_INPUT_ENABLE   1
-#define ADC_RAW_MAX        20000    /* ขนาดบัฟเฟอร์ดิบสูงสุด (จุด, 40 KB) */
+#define ADC_RAW_MAX        78000    /* ขนาดบัฟเฟอร์ดิบสูงสุด (จุด, 152 KB) */
+#define OSC_NT             7        /* จำนวน T/DIV (p44: เพิ่ม 5.0 ms/div ให้ช่วง 40-100 Hz) */
+#define ADC_SAMPLETIME_FAST ADC_SAMPLETIME_3CYCLES     /* 15 รอบ  -> ~792 kSa/s (T/DIV เร็ว) */
+#define ADC_SAMPLETIME_SLOW ADC_SAMPLETIME_480CYCLES   /* 492 รอบ -> ~24 kSa/s  (T/DIV ช้า)  */
+#define ADC_PRE_POINTS     120      /* จำนวนจุด "ก่อน trigger" (ครึ่งจอซ้าย) — p38 */
 
 /* ===== CONFIGURE BUTTONS — change port/pin to match your wiring ===========
  * Wire momentary buttons between pin and GND.
@@ -248,7 +252,7 @@ static void     DrawFps(float fps);
 
 static const char  *gen_wave_names[]  = {"SINE", "SQUARE", "TRI", "SAW"};
 static const float  osc_vdivs[]       = {0.1f, 0.2f, 0.5f, 1.0f, 2.0f};
-static const float  osc_tdivs_ms[]    = {0.1f, 0.2f, 0.5f, 1.0f, 2.0f};
+static const float  osc_tdivs_ms[]    = {0.1f, 0.2f, 0.5f, 1.0f, 2.0f, 5.0f, 6.0f};
 static const char  *osc_set_names[]   = {"FILTER", "TRIG", "V/DIV", "T/DIV"};
 static const char  *osc_hold_names[]  = {"C1", "C2", "V/DIV"};
 
@@ -389,21 +393,36 @@ static void OscMeasureFrame(void)
     float cross[8];
     int   ncross = 0;
 
-    for (int i = 0; i < N_SAMPLES; i++) {
+    for (int i = 0; i < N_SAMPLES; i++) {          /* รอบ 1: min / max / RMS / peak */
         float v = osc_v[i];
         if (v > vmax) vmax = v;
         if (v < vmin) vmin = v;
         s2 += v * v;
         if (fabsf(v) > peak) peak = fabsf(v);
-        if (i > 0 && ncross < 8) {
+    }
+
+    /* รอบ 2 (p42): นับขอบตัดศูนย์แบบ "มี hysteresis" — กัน noise สร้างขอบปลอม
+     * เดิมนับทุกครั้งที่ข้าม 0: ที่ความถี่ต่ำ (หน้าต่างมี 1-2 คาบ) noise ทำให้ได้ขอบเกิน
+     * -> คาบสั้นผิด (อ่านได้ 2 เท่า) หรือได้ขอบไม่ครบ -> อ่านได้ 0
+     * ใหม่: หลังนับขอบหนึ่ง ต้องรอให้สัญญาณแกว่งพ้นครึ่งตรงข้ามก่อน จึงนับขอบถัดไป */
+    {
+        float hyst = 0.2f * (vmax - vmin);          /* ±20% ของ Vpp */
+        int   armed = 1;
+        if (hyst < 1e-6f) hyst = 1e-6f;
+        prev = osc_v[0];
+        for (int i = 1; i < N_SAMPLES; i++) {
+            float v = osc_v[i];
             int up = (!osc_trig_fall && prev < 0.0f && v >= 0.0f);
             int dn = ( osc_trig_fall && prev >= 0.0f && v < 0.0f);
-            if (up || dn) {
+            if (armed && (up || dn)) {
                 float f = (v != prev) ? (-prev / (v - prev)) : 0.0f;
-                cross[ncross++] = ((float)i - 1.0f + f) / osc_fs_eff;
+                if (ncross < 8) cross[ncross++] = ((float)i - 1.0f + f) / osc_fs_eff;
+                armed = 0;
+            } else if (!armed) {
+                if (osc_trig_fall ? (v > hyst) : (v < -hyst)) armed = 1;
             }
+            prev = v;
         }
-        prev = v;
     }
 
     osc_meas.vmax = vmax;
@@ -412,7 +431,10 @@ static void OscMeasureFrame(void)
     osc_meas.vrms = sqrtf(s2 / (float)N_SAMPLES);
     osc_meas.dc_offset = osc_offset_v;              /* DC ก่อนทำ AC coupling */
     osc_meas.freq = 0.0f;
-    if (ncross >= 2) {                              /* วัดคาบจากจุดตัดศูนย์ */
+    if ((vmax - vmin) < 0.05f) {                    /* p43: สัญญาณเล็กเกิน (เช่นยังไม่ต่อสาย)
+                                                     * -> ไม่รายงานความถี่ (เดิมโชว์ค่า noise) */
+        osc_meas.freq = 0.0f;
+    } else if (ncross >= 2) {                       /* วัดคาบจากจุดตัดศูนย์ */
         float span = cross[ncross - 1] - cross[0];
         if (span > 0.0f) osc_meas.freq = (float)(ncross - 1) / span;
     }
@@ -624,12 +646,30 @@ static float OscFreqFromWindow(void)
     return osc_fs_eff / period;
 }
 
+/* สถานะการสแกนของ AutoScale (p33) */
+static uint8_t osc_auto_second = 0;      /* 0 = อ่านครั้งแรก, 1 = อ่านซ้ำ */
+static float   osc_auto_v1     = 0.0f;   /* Vpp ที่อ่านครั้งแรก */
+static float   osc_auto_vppmax = 0.0f;   /* Vpp มากสุดที่สแกนเจอ */
+static int     osc_auto_best   = 0;      /* base ที่ Vpp ครบที่สุด */
+volatile float   dbg_auto_vpp[OSC_NT] = {0};  /* ค่าที่เห็นในแต่ละ base (ตรวจผ่าน SWD) */
+volatile float   dbg_auto_f[OSC_NT]   = {0};
+volatile float   dbg_auto_fsel   = 0.0f; /* ความถี่ที่ใช้ตัดสินสุดท้าย */
+
 static void OscAutoScale(void)                          /* เริ่มทำงาน (คีย์ 'z') */
 {
+    (void)OscWindowHasCycle;   /* p33: ไม่ใช้แล้ว (เก็บโค้ดเดิมไว้) — กัน warning */
     osc_tdiv_i     = 0;                                 /* เริ่มที่ time base เร็วสุด */
     osc_fs_eff     = (float)N_SAMPLES / (osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS / 1000.0f);
-    osc_auto_stage = 3;
-    osc_auto_wait  = 2;
+    osc_auto_stage  = 3;
+    osc_auto_wait   = 2;
+    osc_auto_second = 0;
+    osc_auto_v1     = 0.0f;
+    osc_auto_vppmax = 0.0f;
+    osc_auto_best   = 0;
+    for (int i = 0; i < (int)(sizeof(dbg_auto_vpp) / sizeof(dbg_auto_vpp[OSC_NT])); i++) {
+        dbg_auto_vpp[i] = 0.0f;
+        dbg_auto_f[i]   = 0.0f;
+    }
     osc_dirty      = 1;
     UartPrint("\r\n AutoScale...\r\n");
 }
@@ -643,35 +683,91 @@ static void OscAutoScaleStep(void)                      /* เรียกทุ
     if (osc_auto_wait) { osc_auto_wait--; return; }
 
     if (osc_auto_stage == 3) {
-        if (!OscWindowHasCycle() && osc_tdiv_i < NT - 1) {      /* ยังไม่ถึง 1 คาบ -> ช้าลงอีกขั้น */
+        /* --- สแกนทุก T/DIV: เก็บ Vpp (อ่าน 2 ครั้ง เอาค่าต่ำกว่า = ทิ้งค่าชั่วขณะ) --- */
+        int i = osc_tdiv_i;
+        if (i < 0) i = 0;
+        if (i > NT - 1) i = NT - 1;
+
+        if (!osc_auto_second) {                             /* อ่านครั้งที่ 1 */
+            osc_auto_v1     = osc_meas.vpp;
+            osc_auto_second = 1;
+            osc_auto_wait   = 2;                            /* รอ 2 เฟรมแล้วอ่านซ้ำ */
+            return;
+        }
+
+        float v = osc_meas.vpp;                             /* อ่านครั้งที่ 2 */
+        if (osc_auto_v1 > 0.0f && osc_auto_v1 < v) v = osc_auto_v1;   /* ค่าชั่วขณะจะ "สูงเกิน" */
+        float f = OscFreqFromWindow();
+        osc_auto_second = 0;
+        if (i < (int)(sizeof(dbg_auto_vpp) / sizeof(dbg_auto_vpp[OSC_NT]))) {
+            dbg_auto_vpp[i] = v;
+            dbg_auto_f[i]   = f;
+        }
+        if (v > 0.002f && v < 3.5f && v > osc_auto_vppmax * 1.02f) {   /* base ที่ Vpp ครบที่สุด */
+            osc_auto_vppmax = v;
+            osc_auto_best   = i;
+        }
+
+        if (osc_tdiv_i < NT - 1) {                          /* ไป base ถัดไป */
             osc_tdiv_i++;
             osc_fs_eff    = (float)N_SAMPLES / (osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS / 1000.0f);
-            osc_auto_wait = 2;
+            osc_auto_wait = 3;
             osc_dirty     = 1;
             return;
         }
 
-        /* ความถี่ที่ใช้ตัดสิน T/DIV:
-         * 1) โหมด function generator (sim): ค่าที่ตั้งไว้คือความจริง -> เชื่อถือที่สุด
-         * 2) ไม่งั้นวัดจากหน้าต่างที่วาดจริง (hysteresis กัน noise)
-         * 3) แล้วค่อยใช้ค่าที่วัดในเฟรม | 4) สุดท้ายค่าเริ่มต้น                     */
+        /* --- จบการสแกน: กลับไป base ที่เชื่อถือได้ แล้วเตรียมตัดสิน --- */
+        osc_tdiv_i     = osc_auto_best;
+        osc_fs_eff     = (float)N_SAMPLES / (osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS / 1000.0f);
+        osc_auto_stage = 4;
+        osc_auto_wait  = 3;
+        osc_dirty      = 1;
+        return;
+    }
+
+    if (osc_auto_stage == 4) {
+        /* --- เลือกความถี่: จาก base ที่ Vpp ครบสุด -> median ของค่าที่วัดได้ -> ค่าที่วัดในเฟรม --- */
         float f = 0.0f;
-        if (!ADC_INPUT_ENABLE && SIM_STREAM_MODE == 2) f = gen_freq;   /* p30 */
-        if (!(f > 20.0f) || !(f < 1.0e5f)) f = OscFreqFromWindow();
-        if (!(f > 20.0f) || !(f < 1.0e5f)) f = osc_meas.freq;
-        if (!(f > 1.0f)) f = 1000.0f;
+        if (osc_auto_best >= 0 && osc_auto_best < (int)(sizeof(dbg_auto_f) / sizeof(dbg_auto_f[OSC_NT])))
+            f = dbg_auto_f[osc_auto_best];
+        if (!(f > 20.0f) || !(f < 1.0e5f)) {                /* ใช้ไม่ได้ -> median ของทุก base */
+            float m[8]; int nm = 0;
+            for (int k = 0; k < NT && k < (int)(sizeof(dbg_auto_f) / sizeof(dbg_auto_f[OSC_NT])); k++) {
+                float x = dbg_auto_f[k];
+                if (x > 20.0f && x < 1.0e5f) m[nm++] = x;
+            }
+            for (int a = 1; a < nm; a++) {                  /* insertion sort (เล็ก) */
+                float key = m[a]; int b2 = a - 1;
+                while (b2 >= 0 && m[b2] > key) { m[b2 + 1] = m[b2]; b2--; }
+                m[b2 + 1] = key;
+            }
+            if (nm > 0) f = m[nm / 2];
+        }
+        if (!(f > 20.0f) || !(f < 1.0e5f)) f = osc_meas.freq;      /* รองสุดท้าย: ค่าที่วัดในเฟรม */
+        if (!(f > 20.0f) || !(f < 1.0e5f)) {
+            /* p45: วัดไม่ได้จริง ๆ -> ไป base ช้าสุด (เห็นคาบมากสุด) ให้วัดใหม่ในเฟรมถัดไป
+             * เดิมสร้างค่า f ปลอม (1920 Hz) แล้วเลือก base เร็วผิด -> จอโชว์ 0 Hz ตลอด */
+            osc_tdiv_i     = NT - 1;
+            osc_fs_eff     = (float)N_SAMPLES / (osc_tdivs_ms[NT - 1] * (float)OSC_H_DIVS / 1000.0f);
+            osc_auto_stage = 2;
+            osc_auto_wait  = 3;
+            osc_dirty      = 1;
+            return;
+        }
+        dbg_auto_fsel = f;
 
         int   ti   = osc_tdiv_i;
         float best = 1.0e30f;
-        for (int i = 0; i < NT; i++) {
-            float cycles = f * osc_tdivs_ms[i] * (float)OSC_H_DIVS / 1000.0f;
+        for (int k = 0; k < NT; k++) {
+            float cycles = f * osc_tdivs_ms[k] * (float)OSC_H_DIVS / 1000.0f;
             float d = fabsf(cycles - OSC_FIT_CYCLES);
-            if (d < best) { best = d; ti = i; }
+            if (cycles < 2.0f) d += 10.0f;   /* p45: ต้องเห็น >= 2 คาบ ไม่งั้นตัววัดอ่านได้ 0 */
+            if (d < best) { best = d; ti = k; }
         }
         osc_tdiv_i     = ti;
         osc_fs_eff     = (float)N_SAMPLES / (osc_tdivs_ms[ti] * (float)OSC_H_DIVS / 1000.0f);
         osc_auto_stage = 2;
-        osc_auto_wait  = 2;                                     /* รอวัด Vpp ที่ T/DIV นี้ */
+        osc_auto_wait  = 3;                                     /* รอวัด Vpp ที่ T/DIV สุดท้าย */
         osc_dirty      = 1;
         return;
     }
@@ -691,7 +787,7 @@ static void OscAutoScaleStep(void)                      /* เรียกทุ
 
         UartPrint("\r\n AutoScale");
         UartNum("  Vpp:", osc_meas.vpp, " V");
-        snprintf(b, sizeof(b), "  f:%d Hz", (int)osc_meas.freq);
+        snprintf(b, sizeof(b), "  f:%d Hz", (int)(osc_meas.freq + 0.5f));   /* p44: ปัด ไม่ตัด */
         UartPrint(b);
         UartPrint("  ->");
         UartNum("  V/div:", osc_vdivs[vi], " V");
@@ -738,7 +834,7 @@ static void UartPanel(void)
     UartNum("\r\n Vmax:", osc_meas.vmax, " V");  UartNum("   Vmin:", osc_meas.vmin, " V");
     UartNum("\r\n Vpp: ", osc_meas.vpp,  " V");  UartNum("   RMS: ", osc_meas.vrms, " V");
     UartNum("\r\n DC:  ", osc_meas.dc_offset, " V");
-    snprintf(b, sizeof(b), "   Freq: %d Hz", (int)osc_meas.freq);
+    snprintf(b, sizeof(b), "   Freq: %d Hz", (int)(osc_meas.freq + 0.5f));   /* p44: ปัด */
     UartPrint(b);
     if (hold_active) {
         UartNum("\r\n U1:", osc_v[osc_c1], " V");  UartNum("   U2:", osc_v[osc_c2], " V");
@@ -1440,6 +1536,7 @@ volatile uint16_t dbg_adc_max    = 0;
 volatile uint32_t dbg_adc_frames = 0;
 volatile uint8_t  dbg_adc_ok     = 0;      /* 0 = ยังวัดอัตราสุ่มไม่สำเร็จ         */
 volatile float    dbg_adc_step   = 1.0f;   /* จุดดิบต่อ 1 จุดแสดงผล (step จริง)     */
+volatile uint32_t dbg_adc_start  = 0;      /* index ที่เริ่มวาด (จุด trigger, p38)   */
 
 static inline uint32_t AdcMicros(void)
 {
@@ -1553,11 +1650,12 @@ static void AdcCaptureFrame(void)
         w = (uint32_t)(step + 0.5f);
         if (w < 1u) w = 1u;
     }
-    n = (uint32_t)((float)N_SAMPLES * step) + w + 2u;       /* จำนวนจุดดิบที่ต้องจับ */
+    /* เผื่อ ADC_PRE_POINTS จุดแรกไว้หาจุด trigger (ไม่ต้องวนกลับบัฟเฟอร์ตอนวาด) */
+    n = (uint32_t)((float)(N_SAMPLES + ADC_PRE_POINTS) * step) + w + 2u;
     while (n > ADC_RAW_MAX && w > 1u) {                     /* กันล้นบัฟเฟอร์ */
         w--;
         if (!dbg_adc_ok || fs_want <= 1.0f) step = (float)w;
-        n = (uint32_t)((float)N_SAMPLES * step) + w + 2u;
+        n = (uint32_t)((float)(N_SAMPLES + ADC_PRE_POINTS) * step) + w + 2u;
     }
     if (n > ADC_RAW_MAX) { n = ADC_RAW_MAX; }
     if ((uint32_t)((float)(N_SAMPLES - 1) * step) + w >= n) {   /* กันหลุดขอบท้าย */
@@ -1574,8 +1672,34 @@ static void AdcCaptureFrame(void)
     }
 
     dbg_adc_step = step;
-    for (int i = 0; i < N_SAMPLES; i++) {   /* resample แบบเศษ + boxcar เฉลี่ย w จุด */
-        int32_t c = (int32_t)((float)i * step + 0.5f);
+
+    /* --- หาจุด trigger ในข้อมูลดิบ (ระดับ = ค่ากลางของบัฟเฟอร์) แล้วเริ่มวาดที่จุดนั้น --- */
+    uint32_t start = 0;
+    {
+        float sum = 0.0f, mid;
+        uint32_t lim = (uint32_t)((float)ADC_PRE_POINTS * step) + w;   /* ค้นเฉพาะส่วนก่อน trigger */
+        if (lim < 4u) lim = 4u;
+        if (lim > n) lim = n;
+        for (uint32_t i = 0; i < n; i++) sum += (float)adc_raw_buf[i];
+        mid = sum / (float)n;
+        if (osc_trig_fall) {
+            for (uint32_t i = 1; i < lim; i++)
+                if ((float)adc_raw_buf[i - 1u] >= mid && (float)adc_raw_buf[i] < mid) { start = i; break; }
+        } else {
+            for (uint32_t i = 1; i < lim; i++)
+                if ((float)adc_raw_buf[i - 1u] < mid && (float)adc_raw_buf[i] >= mid) { start = i; break; }
+        }
+        if ((float)start + (float)N_SAMPLES * step + (float)w > (float)n) start = 0;   /* กันหลุดขอบท้าย */
+
+        /* เหลื่อมไปข้างหน้า ~2 จุดแสดงผล: ไม่ให้หน้าต่าง "เริ่มตรงจุดตัดศูนย์พอดี"
+         * (ถ้าเริ่มพอดี ตัววัดความถี่ของ firmware จะนับขอบแรกพลาดเป็นครั้งคราว -> f กระพริบเป็น 0) */
+        uint32_t lead = (uint32_t)(2.0f * step + 1.0f);
+        start = (start > lead) ? (start - lead) : 0u;
+    }
+    dbg_adc_start = start;
+
+    for (int i = 0; i < N_SAMPLES; i++) {   /* resample แบบเศษ + boxcar เฉลี่ย w จุด (เริ่มที่จุด trigger) */
+        int32_t c = (int32_t)start + (int32_t)((float)i * step + 0.5f);
         int32_t lo = c - (int32_t)((w - 1u) / 2u);
         uint32_t acc = 0;
         if (lo < 0) lo = 0;
@@ -1772,9 +1896,25 @@ int main(void)
                  * osc_stable = 0: ไม่จัดแนว -> ข้อมูลใหม่เข้าขวา เส้นไถลซ้าย (roll) */
                 int trig_offset = 0;
                 if (osc_stable) {
+#if ADC_INPUT_ENABLE
+                    /* p38: จัดแนว trigger ตั้งแต่ตอนจับข้อมูล (AdcCaptureFrame) แล้ว
+                     * -> หน้าต่างเริ่มที่จุด trigger จริง ไม่ต้องหาใหม่/ไม่ต้องวนกลับบัฟเฟอร์
+                     *    (เดิม FindTrigger หาใหม่แล้วได้คนละจุด ทำให้จุดวนกลับเลื่อนกลางจอ) */
+                    trig_offset = 0;
+                    trig_hold   = 0;
+                    (void)FindTrigger;   /* p39: โหมด ADC จัดแนวตอนจับข้อมูลแล้ว */
+#else
                     int t = FindTrigger();
-                    if (t >= 0) trig_hold = t;
-                    trig_offset = trig_hold;
+                    if (t >= 0) {
+                        trig_hold   = t;
+                        trig_offset = t;
+                    } else {
+                        /* หน้าต่างสั้นกว่าหนึ่งคาบ (ความถี่ต่ำกว่า time base) -> หาขอบไม่ได้
+                         * เดิมใช้ค่า trig_hold เก่า => รูปวาดไม่ตรงจุด -> กระโดด/ขาด
+                         * ใหม่: วาดแบบไถล (offset 0) ต่อเนื่องแทน */
+                        trig_offset = 0;
+                    }
+#endif
                 }
                 dbg_trig_off = trig_offset;
                 ClearCursors();         /* ล้างเส้น cursor เก่าก่อนวาดเฟรมใหม่ */
