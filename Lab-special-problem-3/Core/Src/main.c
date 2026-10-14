@@ -94,6 +94,8 @@
 #define N_SAMPLES       240
 
 /* --- Frame timing ---------------------------------------------------------- */
+/* Heavy sample loops of the FAST path are compiled at -O2 even in the Debug (-O0) build: AdcRawFrequency alone took 51 ms for 27k samples at -O0 */
+#define FAST_O2         __attribute__((optimize("O2")))
 #define FRAME_MS        33           /* ~30 FPS                                 */
 #define HEADER_MS       300          /* header refresh interval (ms)            */
 #define BTN_MAN_PORT    User_Blue_GPIO_Port   /* PC13 = Nucleo user button (blue) */
@@ -227,6 +229,8 @@ static void     DrawFps(float fps);
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
+volatile uint32_t dbg_adc_pre = 0;   /* pre-trigger display points used by the last FAST capture */
+volatile uint32_t prof_us[8];   /* PROFILING (us): 0 capture, 1 process+measure+atb, 2 draw, 3 whole frame, 4 header, 5 loop period */
 
 
 
@@ -278,7 +282,7 @@ static uint8_t  osc_calib     = 1;         /* AC coupling (calibrate offset)   *
 static uint8_t  osc_dirty     = 1;         /* สั่งวาดใหม่แม้อยู่โหมด HOLD         */
 
 /* โหมดจอ (ดูโหมดที่ใช้อยู่ได้ที่บรรทัด Trig: ในหน้ารายงาน / บนจอ LCD) */
-static uint8_t  osc_stable    = 1;   /* 1 = AUTO: the picture locks to the trigger edge from 45 Hz up (both modes), rolls below | 0 = always roll (UART 'r') */
+static uint8_t  osc_stable    = 0;   /* 0 = ROLL (default, v36): never lock, the picture moves in every mode | 1 = AUTO: lock to the trigger edge from 45 Hz up (UART 'a') */
 static uint8_t  osc_lock_auto = 0;   /* set by the auto time base: 1 while the signal is >= 45 Hz (hysteresis 35 / 45 Hz) */   /* 1 = นิ่ง (trigger) | 0 = ไถล (roll)  */
 static int      trig_hold     = 0;   /* trigger offset ล่าสุดที่ใช้          */
 static int      dbg_trig_off  = 0;   /* เก็บไว้ตรวจย้อนหลังผ่าน SWD          */
@@ -301,6 +305,14 @@ static const uint8_t adc_meas_seq[3] = { 1u, 0u, 4u };   /* 800 kSa/s (original)
 static uint8_t  adc_too_fast = 0;      /* last measurement saw a signal above the usable range of its rate */
 static uint8_t  adc_fast_content = 0;  /* the 800 kSa/s-or-faster capture is full of sample-to-sample change: signal is fast, not slow */
 static uint8_t  adc_over_range = 0;    /* frequency above the readout limit (shown as >2.1MHz) */
+static float    adc_last_good_f = 0.0f;   /* last confirmed reading (old measurement or display capture) */
+static uint32_t adc_last_good_t = 0u, adc_legacy_t = 0u;   /* its tick; tick of the last old two-capture measurement */
+volatile uint32_t dbg_fm_cnt = 0;
+volatile uint32_t dbg_pipe_cnt = 0;   /* frames whose capture was started during the previous draw (SWD) */
+static volatile uint8_t adc_pend = 0;  /* a display capture is running (started by AdcPrestart) */
+static int adc_pd_tdiv, adc_pd_lvl;    /* settings it was started with */
+static uint32_t adc_pd_n, adc_pd_w, adc_pd_pre, adc_pd_t0, adc_pd_tick;
+static float adc_pd_step;      /* frames measured from the display capture (SWD) */
 static float    adc_hold_f = 0.0f;     /* last good reading, held for a short time so one failed frame does not blank the display */
 static uint32_t adc_hold_t = 0;
 static uint32_t adc_probe_t = 0;       /* tick of the last alias probe (at most one per second) */
@@ -735,10 +747,12 @@ volatile uint8_t dbg_atb_why = 0, dbg_atb_from = 0, dbg_atb_to = 0;   /* last sw
 volatile float   dbg_atb_arg = 0.0f;                                  /* the frequency that decided it */
 volatile uint32_t dbg_atb_log[8];                                      /* ring of the last 8 switches: (why<<16)|(from<<8)|to */
 volatile uint8_t  dbg_atb_log_i = 0;
+volatile float    dbg_atb_arg_log[8];                                  /* the frequency that decided each logged switch */
 static void AtbSwitch(int ti)
 {
     if (ti == osc_tdiv_i) return;
     dbg_atb_from = (uint8_t)osc_tdiv_i; dbg_atb_to = (uint8_t)ti;
+    dbg_atb_arg_log[dbg_atb_log_i & 7u] = dbg_atb_arg;
     dbg_atb_log[dbg_atb_log_i & 7u] = ((uint32_t)dbg_atb_why << 16) | ((uint32_t)osc_tdiv_i << 8) | (uint32_t)ti; dbg_atb_log_i++;
     osc_tdiv_i   = ti;
     atb_t_switch = HAL_GetTick();
@@ -1691,6 +1705,7 @@ DMA_HandleTypeDef hdma_adc1;
 
 ALIGN_32BYTES(uint16_t adc_raw_buf[ADC_RAW_MAX]);
 static volatile uint8_t  adc_done = 0, adc_error = 0;
+static volatile uint8_t  adc_async = 0;   /* 1 from AdcCaptureStart until the capture is collected or aborted */
 
 /* ค่าที่อ่านผ่าน SWD เพื่อตรวจสอบ */
 volatile float    dbg_adc_rate   = 0.0f;   /* ADC clock / conversion cycles */
@@ -1737,7 +1752,13 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef *adcHandle)
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-    if (hadc->Instance == ADC1) adc_done = 1;
+    if (hadc->Instance == ADC1) {
+        adc_done = 1;
+        if (adc_async) {                       /* async capture finished while the CPU is busy drawing: no more conversions, no overrun interrupts */
+            ADC1->CR2 &= ~ADC_CR2_CONT;
+            ADC1->CR1 &= ~ADC_CR1_OVRIE;
+        }
+    }
 }
 
 void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
@@ -1854,6 +1875,43 @@ static uint8_t AdcCaptureRaw(uint32_t n, uint32_t *t_us)
     return ok;
 }
 
+/* ASYNC single-ADC capture: Start returns at once (DMA runs in hardware), Collect waits for the end and returns the buffer to the CPU.
+ * Used to capture the NEXT frame while the CPU draws the current one. slow_busy stays 1 for the whole time (the 1 kHz sampler must not touch ADC3). */
+static uint8_t AdcCaptureStart(uint32_t n, uint32_t *t0)
+{
+    if (adc_tri_on || n == 0 || n > ADC_RAW_MAX || n > 65535u || !t0) return 0;
+    uint32_t bytes = (n * 2u + 31u) & ~31u;
+    adc_done = adc_error = 0;
+    SCB_CleanInvalidateDCache_by_Addr((uint32_t *)adc_raw_buf, bytes);
+    __DSB();
+    *t0 = DWT->CYCCNT;
+    ADC1->CR2 |= ADC_CR2_CONT;
+    slow_busy = 1;
+    adc_async = 1;
+    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_raw_buf, n) != HAL_OK) {
+        HAL_ADC_Stop_DMA(&hadc1);
+        ADC1->CR2 |= ADC_CR2_CONT;
+        adc_async = 0; slow_busy = 0;
+        return 0;
+    }
+    return 1;
+}
+
+static uint8_t AdcCaptureCollect(uint32_t n, uint32_t t0, uint32_t *t_us)
+{
+    uint32_t bytes = (n * 2u + 31u) & ~31u, to = HAL_GetTick();
+    uint8_t ok;
+    while (!adc_done && !adc_error && (HAL_GetTick() - to) < 200u) { }
+    ok = adc_done && !adc_error;
+    if (HAL_ADC_Stop_DMA(&hadc1) != HAL_OK) ok = 0;
+    ADC1->CR2 |= ADC_CR2_CONT;                       /* the callback cleared it: every other capture path expects continuous mode */
+    adc_async = 0; slow_busy = 0;
+    if (t_us) *t_us = AdcElapsedUs(t0);
+    SCB_InvalidateDCache_by_Addr((uint32_t *)adc_raw_buf, bytes);
+    __DSB();
+    return ok;
+}
+
 static void AdcInputInit(void)
 {
     ADC_ChannelConfTypeDef c = {0};
@@ -1934,12 +1992,13 @@ static uint8_t AdcSetRateLevel(int lvl)
     return 1;
 }
 
-static float AdcRawFrequency(uint32_t n, float fs)
+/* buf = first sample to analyse, n samples: the legacy measurement passes the whole capture, the fast path only the newest ~3.8 periods of the display capture */
+static float FAST_O2 AdcRawFrequency(const uint16_t *buf, uint32_t n, float fs)
 {
     uint16_t mn = 4095, mx = 0;
     for (uint32_t i = 0; i < n; i++) {
-        if (adc_raw_buf[i] < mn) mn = adc_raw_buf[i];
-        if (adc_raw_buf[i] > mx) mx = adc_raw_buf[i];
+        if (buf[i] < mn) mn = buf[i];
+        if (buf[i] > mx) mx = buf[i];
     }
     osc_raw_vpp = (mx - mn) * ADC_VREF / ADC_FULL;
     adc_fast_content = 0;
@@ -1949,7 +2008,7 @@ static float AdcRawFrequency(uint32_t n, float fs)
     if (adc_tri_on && osc_raw_vpp < 0.30f) return 0.0f;   /* at 4.8 MSa/s a 0.15-0.2 Vpp noise band (generator off / 0 Hz) crosses its middle every ~2 samples = a false 2 MHz; real 2 MHz measured 0.6 Vpp */
     {   /* mean |sample-to-sample change| / Vpp: < 2 % for anything below ~50 Hz in this window, > 25 % when there are <= 8 samples per cycle */
         uint32_t acc = 0;
-        for (uint32_t i = 1; i < n; i++) acc += (adc_raw_buf[i] > adc_raw_buf[i - 1]) ? (uint32_t)(adc_raw_buf[i] - adc_raw_buf[i - 1]) : (uint32_t)(adc_raw_buf[i - 1] - adc_raw_buf[i]);
+        for (uint32_t i = 1; i < n; i++) acc += (buf[i] > buf[i - 1]) ? (uint32_t)(buf[i] - buf[i - 1]) : (uint32_t)(buf[i - 1] - buf[i]);
         adc_rough_ratio = (float)acc / (float)(n - 1u) / (float)(mx - mn);
         if (osc_raw_vpp >= 0.30f && adc_rough_ratio > 0.25f && (float)acc / (float)(n - 1u) > 120.0f) adc_fast_content = 1;   /* a 0.2 Vpp noise band is not a fast signal */
     }
@@ -1964,7 +2023,7 @@ static float AdcRawFrequency(uint32_t n, float fs)
         uint32_t edges = 0;
         int armed = 0;
         for (uint32_t i = 1; i < n; i++) {
-            float prev = adc_raw_buf[i - 1], v = adc_raw_buf[i];
+            float prev = buf[i - 1], v = buf[i];
             if (v < mid - hyst) armed = 1;
             if (armed && prev < mid && v >= mid) {
                 float at = (float)(i - 1) + (mid - prev) / (v - prev);
@@ -1995,7 +2054,7 @@ static float AdcRawFrequency(uint32_t n, float fs)
             float gsum = 0.0f;
             armed = 0;
             for (uint32_t i = 1; i < n; i++) {
-                float prev = adc_raw_buf[i - 1], v = adc_raw_buf[i];
+                float prev = buf[i - 1], v = buf[i];
                 if (v < mid - hyst) armed = 1;
                 if (armed && prev < mid && v >= mid) {
                     float at = (float)(i - 1) + (mid - prev) / (v - prev);
@@ -2011,9 +2070,9 @@ static float AdcRawFrequency(uint32_t n, float fs)
             if (i1 > i0 + 1u && i1 < n) {
                 uint32_t sm = 0;
                 float cnt = (float)(i1 - i0 + 1u), mean, sq = 0.0f;
-                for (uint32_t i = i0; i <= i1; i++) sm += adc_raw_buf[i];
+                for (uint32_t i = i0; i <= i1; i++) sm += buf[i];
                 mean = (float)sm / cnt;
-                for (uint32_t i = i0; i <= i1; i++) { float d = (float)adc_raw_buf[i] - mean; sq += d * d; }
+                for (uint32_t i = i0; i <= i1; i++) { float d = (float)buf[i] - mean; sq += d * d; }
                 osc_raw_mean_ct = mean; osc_raw_rms_ct = sqrtf(sq / cnt);
                 osc_raw_min_ct = (float)mn; osc_raw_max_ct = (float)mx; osc_raw_valid = 1;
             }
@@ -2023,8 +2082,87 @@ static float AdcRawFrequency(uint32_t n, float fs)
     return 0.0f;
 }
 
+/* Pure planning (no hardware): display level + nominal step for this time base, and whether the measurement can be read from the display capture. */
+static uint8_t AdcPlanFrame(float fs_want, int *lvl_o, float *step_o)
+{
+    int lvl = 1;                                  /* 800 kSa/s: the original rate, used for every time base it can serve */
+    float step = AdcRateHz(1) / fs_want;
+    uint8_t fast_meas = 0;
+    if (step < 1.0f) {                            /* time base faster than 800 kSa/s can draw */
+        lvl = 0; step = AdcRateHz(0) / fs_want;   /* 1.6 MSa/s */
+        if (step < 1.0f) { lvl = 4; step = AdcRateHz(4) / fs_want; }   /* 4.8 MSa/s, 3 ADCs */
+    } else if ((N_SAMPLES + ADC_PRE_POINTS + 1) * step + 3 > ADC_RAW_MAX) {     /* too slow for 800 kSa/s: longer capture */
+        lvl = 2; step = AdcRateHz(2) / fs_want;
+        if ((N_SAMPLES + ADC_PRE_POINTS + 1) * step + 3 > ADC_RAW_MAX) { lvl = 3; step = AdcRateHz(3) / fs_want; }
+    }
+    /* STEP 2 (frame rate): when the frequency is known and fresh, the display capture itself holds >= 3.4 periods at a rate >= 16 samples per cycle,
+     * so the separate measurement capture (3.2 periods, ~50 ms + setup) is skipped and AdcRawFrequency reads the display buffer. The old two-capture
+     * measurement (alias probe, rate hunting, growth of the window) still runs about once a second and whenever a reading is lost or changes. */
+    {   uint32_t t0n = HAL_GetTick();
+        if (adc_last_good_f > 0.0f && (t0n - adc_last_good_t) < 1200u && (t0n - adc_legacy_t) < 1000u && lvl != 4) {
+            float R = AdcRateHz(lvl), f0 = adc_last_good_f;
+            if (f0 <= R * (1.0f / 16.0f)) {
+                uint32_t pp0 = (uint32_t)(1.3f * fs_want / f0) + 12u;
+                float n0;
+                if (pp0 > ADC_PRE_POINTS) pp0 = ADC_PRE_POINTS;
+                if (pp0 < 40u) pp0 = 40u;
+                n0 = ((float)(N_SAMPLES + pp0) * step + step + 2.0f);
+                if (n0 * f0 / R >= 3.4f) fast_meas = 1;
+            }
+        }
+    }
+    *lvl_o = lvl; *step_o = step;
+    return fast_meas;
+}
+
+/* display points recorded before the trigger search ends: 1.3 periods + margin when the frequency f is known, else the full ADC_PRE_POINTS */
+static uint32_t AdcPreFor(float fs_want, float f)
+{
+    uint32_t pre = ADC_PRE_POINTS;
+    if (f > 0.0f && fs_want > 0.0f) {
+        uint32_t pp = (uint32_t)(1.3f * fs_want / f) + 12u;
+        if (pp < pre) pre = pp;
+        if (pre < 40u) pre = 40u;
+    }
+    return pre;
+}
+
+static void AdcAbortPending(void)
+{
+    if (!adc_pend) return;
+    HAL_ADC_Stop_DMA(&hadc1);
+    ADC1->CR2 |= ADC_CR2_CONT;
+    adc_async = 0; slow_busy = 0; adc_pend = 0;
+}
+
+/* STEP 3 (frame rate): called by the main loop after the numbers of a frame are done and BEFORE it draws. Starts the capture of the next frame so the
+ * DMA runs while the CPU draws (the draw no longer adds to the frame time). Only for the cheap case (fast measurement path, single ADC, FAST time base);
+ * anything else is left to the normal blocking AdcCaptureFrame. */
+static void AdcPrestart(void)
+{
+    float fs_want, step;
+    int lvl;
+    uint32_t w, pre, n;
+    if (adc_pend || osc_tdiv_i >= OSC_NT_FAST || !osc_frame_valid) return;
+    fs_want = (float)N_SAMPLES / (osc_tdivs_ms[osc_tdiv_i] * OSC_H_DIVS / 1000.0f);
+    if (!AdcPlanFrame(fs_want, &lvl, &step) || lvl == 4) return;
+    if (!AdcSetRateLevel(lvl)) return;
+    step = dbg_adc_rate / fs_want;
+    if (step < 1.0f) step = 1.0f;
+    w = (uint32_t)(step + 0.5f);
+    pre = AdcPreFor(fs_want, adc_last_good_f);
+    n = (uint32_t)((N_SAMPLES + pre) * step) + w + 2u;
+    if (n > ADC_RAW_MAX) return;
+    if (!AdcCaptureStart(n, &adc_pd_t0)) return;
+    adc_pd_tdiv = osc_tdiv_i; adc_pd_lvl = lvl; adc_pd_n = n; adc_pd_w = w; adc_pd_pre = pre; adc_pd_step = step; adc_pd_tick = HAL_GetTick();
+    adc_pend = 1;
+    dbg_pipe_cnt++;
+}
+
+#define PROF_START()   (DWT->CYCCNT)
+#define PROF_END(i,t0)  (prof_us[i] = AdcElapsedUs(t0))
 /* จับ 1 เฟรม: เลือกตัวหารจาก T/DIV -> เฉลี่ย -> raw_samples[N_SAMPLES] */
-static void AdcCaptureFrame(void)
+static void FAST_O2 AdcCaptureFrame(void)
 {
     float fs_want = (float)N_SAMPLES / (osc_tdivs_ms[osc_tdiv_i] * OSC_H_DIVS / 1000.0f);
     uint32_t n, t_us = 0;
@@ -2036,14 +2174,25 @@ static void AdcCaptureFrame(void)
     osc_meas = (OscMeasure){0};
     strcpy(osc_det, "INVALID");
 
+    int lvl; float step;
+    uint8_t fast_meas = AdcPlanFrame(fs_want, &lvl, &step);
+
+    uint8_t use_pend = 0;                         /* STEP 3: a capture of THIS frame was started during the previous draw */
+    if (adc_pend) {
+        if (fast_meas && adc_pd_tdiv == osc_tdiv_i && adc_pd_lvl == lvl) use_pend = 1;
+        else AdcAbortPending();                   /* time base or measurement path changed: forget it */
+    }
+
     /* Fast, independent measurement: 4 ms initially, grow on later frames
      * until >=3 periods are available. Max 81.9 ms only for slow/no signal.
      * Every acquisition is contiguous; never stitch separate DMA blocks.
      * Supported periodic input: 40 Hz..100 kHz, >=50 mVpp, within 0..3.3 V.
      * External anti-alias filtering/source impedance remain hardware duties. */
+    uint32_t pB0 = PROF_START(); prof_us[5] = 0;
+    if (!fast_meas) {
     if (!AdcSetRateLevel(adc_meas_seq[adc_meas_lvl]) || !AdcCaptureRaw(adc_measure_n, &t_us)) goto failed;
     adc_too_fast = 0;
-    osc_raw_freq = AdcRawFrequency(adc_measure_n, dbg_adc_rate);
+    osc_raw_freq = AdcRawFrequency(adc_raw_buf, adc_measure_n, dbg_adc_rate);
     adc_over_range = adc_too_fast;
     uint8_t meas_on_tri = adc_tri_on;
     uint8_t probe_due = ((HAL_GetTick() - adc_probe_t) >= 1000u);
@@ -2095,38 +2244,66 @@ static void AdcCaptureFrame(void)
     if (osc_raw_freq <= 0.0f) osc_raw_valid = 0;               /* statistics only for a confirmed reading */
     {   /* hold the last good reading for 1.5 s: a marginal signal (e.g. 2 MHz at 2.4 samples/cycle) fails on some frames */
         uint32_t tnow = HAL_GetTick();
-        if (osc_raw_freq > 0.0f)                                { adc_hold_f = osc_raw_freq; adc_hold_t = tnow; }
+        if (osc_raw_freq > 0.0f)                                { adc_hold_f = osc_raw_freq; adc_hold_t = tnow; adc_last_good_f = osc_raw_freq; adc_last_good_t = tnow; }
         else if (osc_raw_vpp < 0.05f || adc_over_range)         { adc_hold_f = 0.0f; }
         else if (adc_hold_f > 0.0f && (tnow - adc_hold_t) < 1500u) { osc_raw_freq = adc_hold_f; }
     }
+    adc_legacy_t = HAL_GetTick();
+    PROF_END(5, pB0);
+    }   /* !fast_meas */
 
-    /* Display capture: the FASTEST rate level whose capture still fits the buffer (never truncate,
-     * never stitch). 15 us/div = raw samples at 1.6 MSa/s; 6 ms/div falls to the 444 kSa/s level. */
-    int lvl = 1;                                  /* 800 kSa/s: the original rate, used for every time base it can serve */
-    float step = AdcRateHz(1) / fs_want;
-    if (step < 1.0f) {                            /* time base faster than 800 kSa/s can draw */
-        lvl = 0; step = AdcRateHz(0) / fs_want;   /* 1.6 MSa/s */
-        if (step < 1.0f) { lvl = 4; step = AdcRateHz(4) / fs_want; }   /* 4.8 MSa/s, 3 ADCs */
-    } else if ((N_SAMPLES + ADC_PRE_POINTS + 1) * step + 3 > ADC_RAW_MAX) {     /* too slow for 800 kSa/s: longer capture */
-        lvl = 2; step = AdcRateHz(2) / fs_want;
-        if ((N_SAMPLES + ADC_PRE_POINTS + 1) * step + 3 > ADC_RAW_MAX) { lvl = 3; step = AdcRateHz(3) / fs_want; }
+    uint32_t pD0 = PROF_START();
+    uint32_t w, dec, pre;
+    if (use_pend) {                               /* started during the previous draw: just wait for it */
+        step = adc_pd_step; w = adc_pd_w; pre = adc_pd_pre; n = adc_pd_n;
+        dec = w;
+        dbg_adc_lvl = (uint8_t)lvl;
+        dbg_adc_pre = pre;
+        if (!AdcCaptureCollect(n, adc_pd_t0, &t_us)) { adc_pend = 0; goto failed; }
+        adc_pend = 0;
+    } else {
+        if (!AdcSetRateLevel(lvl)) goto failed;
+        dbg_adc_lvl = (uint8_t)lvl;
+        step = dbg_adc_rate / fs_want;
+        if (step < 1.0f) step = 1.0f;
+        w = (uint32_t)(step + 0.5f);
+        dec = w;
+        pre = AdcPreFor(fs_want, fast_meas ? adc_last_good_f : osc_raw_freq);
+        dbg_adc_pre = pre;
+        n = (uint32_t)((N_SAMPLES + pre) * step) + w + 2u;
+        if (n > ADC_RAW_MAX || !AdcCaptureRaw(n, &t_us)) goto failed;
     }
-    if (!AdcSetRateLevel(lvl)) goto failed;
-    dbg_adc_lvl = (uint8_t)lvl;
-    step = dbg_adc_rate / fs_want;
-    if (step < 1.0f) step = 1.0f;
-    uint32_t w = (uint32_t)(step + 0.5f);
-    uint32_t dec = w;
-    n = (uint32_t)((N_SAMPLES + ADC_PRE_POINTS) * step) + w + 2u;
-    if (n > ADC_RAW_MAX || !AdcCaptureRaw(n, &t_us)) goto failed;
+    PROF_END(6, pD0);
     dbg_adc_ok = 1;
     dbg_adc_step = step;
+    prof_us[7] = 0;
+    if (fast_meas) {
+        uint32_t pF0 = PROF_START();                                  /* measurement from the display capture (adc_raw_buf still holds it) */
+        float f2;
+        uint32_t tnow;
+        adc_too_fast = 0;
+        {   uint32_t m = (uint32_t)(3.8f * dbg_adc_rate / adc_last_good_f) + 64u;      /* the newest ~3.8 periods are enough for 3 edges: 3x less work */
+            if (m > n) m = n;
+            f2 = AdcRawFrequency(adc_raw_buf + (n - m), m, dbg_adc_rate);
+        }
+        adc_over_range = adc_too_fast;
+        tnow = HAL_GetTick();
+        dbg_fm_cnt++;
+        PROF_END(7, pF0);
+        if (f2 > 0.0f && !adc_too_fast && fabsf(f2 - adc_last_good_f) <= 0.10f * adc_last_good_f) {
+            osc_raw_freq = f2; adc_last_good_f = f2; adc_last_good_t = tnow; adc_hold_f = f2; adc_hold_t = tnow;
+        } else {                                      /* changed or unreadable: the old two-capture measurement takes over on the next frame */
+            osc_raw_freq = 0.0f; osc_raw_valid = 0; adc_last_good_t = 0u;
+            if (osc_raw_vpp < 0.05f || adc_over_range)                 adc_hold_f = 0.0f;
+            else if (adc_hold_f > 0.0f && (tnow - adc_hold_t) < 1500u) osc_raw_freq = adc_hold_f;
+        }
+    }
 
     /* --- หาจุด trigger ในข้อมูลดิบ (ระดับ = ค่ากลางของบัฟเฟอร์) แล้วเริ่มวาดที่จุดนั้น --- */
     uint32_t start = 0;
     if (osc_stable && osc_lock_auto) {
         float sum = 0.0f, mid;
-        uint32_t lim = (uint32_t)((float)ADC_PRE_POINTS * step) + w;   /* ค้นเฉพาะส่วนก่อน trigger */
+        uint32_t lim = (uint32_t)((float)pre * step) + w;   /* ค้นเฉพาะส่วนก่อน trigger */
         if (lim < 4u) lim = 4u;
         if (lim > n) lim = n;
         uint16_t tmn = 0xFFFF, tmx = 0;
@@ -2724,6 +2901,9 @@ int main(void)
 
         uint32_t now = HAL_GetTick();
 
+#if ADC_INPUT_ENABLE
+        if (adc_pend && (hold_active || osc_auto_stage || (now - adc_pd_tick) > 400u)) AdcAbortPending();   /* nobody collected it: give the ADC and the 1 kHz sampler back */
+#endif
         /* --- Button handling (every loop) --------------------------------- */
         HandleButtons(now);
         UartPoll();               /* รับคำสั่งจาก USART3 (แทนปุ่มจริง) */
@@ -2733,6 +2913,7 @@ int main(void)
         if (now - last_frame_tick >= FRAME_MS)
         {
             last_frame_tick = now;
+            uint32_t pf0 = DWT->CYCCNT;
 
 #if SHOW_FPS
             {
@@ -2768,8 +2949,10 @@ int main(void)
                 if (!hold_active) {               /* HOLD = freeze ข้อมูลไว้ ไม่ generate ใหม่ */
 #if ADC_INPUT_ENABLE
                     SlowSync();                   /* T/DIV >= 50 ms -> SLOW (ring), ไม่งั้น FAST (burst) */
-                    if (slow_active) SlowCaptureFrame();
+                    { uint32_t pc0 = DWT->CYCCNT;
+                    if (slow_active) { AdcAbortPending(); SlowCaptureFrame(); }
                     else             AdcCaptureFrame();   /* p30: อ่านข้อมูลจริงจาก ADC (PA0) */
+                    prof_us[0] = AdcElapsedUs(pc0); }
                     if (!osc_frame_valid) goto skip_draw;
 #else
                     osc_capture_tdiv = osc_tdivs_ms[osc_tdiv_i];
@@ -2782,12 +2965,17 @@ int main(void)
 #endif
                 }
                 if (!osc_frame_valid) goto skip_draw;
+                uint32_t pm0 = DWT->CYCCNT;
                 OscProcessFrame();      /* calibrate offset (AC) + moving average filter */
                 OscMeasureFrame();      /* วัดค่า Vmax/Vmin/Vpp/RMS/Freq + ชนิดคลื่น */
                 /* AutoScale ขั้น 2: พอวัดใหม่ที่ time base เร็วสุดแล้ว -> เลือกสเกล */
                 if (osc_auto_stage) OscAutoScaleStep();
                 OscAutoTimebase();      /* AUTO: สลับ FAST/SLOW + T/DIV ตามความถี่ (ถ้าไม่ได้ปรับเอง) */
+                prof_us[1] = AdcElapsedUs(pm0);
                 new_frame_ready = 0;
+#if ADC_INPUT_ENABLE
+                if (!hold_active && !osc_auto_stage && trigger_mode != TRIG_SINGLE && !slow_active) AdcPrestart();   /* the next capture runs by DMA while we draw */
+#endif
 
 #if SHOW_FPS
                 dbg_px_frame = 0;
@@ -2820,11 +3008,13 @@ int main(void)
 #endif
                 }
                 dbg_trig_off = trig_offset;
+                uint32_t pd0 = DWT->CYCCNT;
                 ClearCursors();         /* ล้างเส้น cursor เก่าก่อนวาดเฟรมใหม่ */
                 MapToScreen(trig_offset);
                 DrawWaveform();
                 DrawCursors();          /* HOLD: วาดเส้น C1/C2 ทับหลังวาดรูป */
                 DrawSettingBar();       /* แถบ "กำลังตั้งค่าอะไร" ทับหลังวาดรูป */
+                prof_us[2] = AdcElapsedUs(pd0);
                 osc_dirty = 0;
 
 #if SHOW_FPS
@@ -2844,6 +3034,7 @@ int main(void)
                 }
             }
             skip_draw: ;
+            prof_us[3] = AdcElapsedUs(pf0);
         }
 
         /* --- Header update (every 300 ms) --------------------------------- */
@@ -2854,7 +3045,7 @@ int main(void)
 #if SHOW_FPS
             uint32_t t_h0 = HAL_GetTick();
 #endif
-            DrawTopPanel();
+            { uint32_t ph0 = DWT->CYCCNT; DrawTopPanel(); prof_us[4] = AdcElapsedUs(ph0); }
 
 #if SHOW_FPS
             dbg_hdr_ms = HAL_GetTick() - t_h0;

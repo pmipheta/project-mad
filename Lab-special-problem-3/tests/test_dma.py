@@ -12,17 +12,20 @@ def fn(name):
 pre=r'''#include <stdint.h>
 #include <stdio.h>
 #define ADC_RAW_MAX 65520u
-#define ADC1 1
+typedef struct{uint32_t CR1,CR2;} ADC_TypeDef;static ADC_TypeDef adc1_regs;
+#define ADC1 (&adc1_regs)
+#define ADC_CR2_CONT 0x2u
+#define ADC_CR1_OVRIE 0x4000000u
 #define HAL_OK 0
 #define HAL_ERROR 1
 #define HAL_ADC_ERROR_OVR 2
 #define __DSB() ((void)0)
-typedef struct{int Instance;uint32_t ErrorCode;} ADC_HandleTypeDef;
+typedef struct{ADC_TypeDef*Instance;uint32_t ErrorCode;} ADC_HandleTypeDef;
 static ADC_HandleTypeDef hadc1={ADC1};
 static struct {uint32_t CYCCNT;} dwt;
 #define DWT (&dwt)
 static uint16_t adc_raw_buf[ADC_RAW_MAX] __attribute__((aligned(32)));
-static volatile uint8_t adc_done,adc_error,slow_busy;static int busy_seen;
+static volatile uint8_t adc_done,adc_error,slow_busy,adc_async;static int busy_seen;
 static uint8_t adc_tri_on=0;static uint8_t AdcCaptureTriple(uint32_t n,uint32_t*t){(void)n;(void)t;return 0;}
 static int mode,stops,clean,invalid,alignment,failed;
 static uint32_t tick;
@@ -45,9 +48,9 @@ if 'static inline uint32_t AdcMicros(' in s:body+=fn('AdcMicros')
 if 'static uint32_t AdcElapsedUs(' in s:body+=fn('AdcElapsedUs')
 if 'void HAL_ADC_ErrorCallback(' in s:body+=fn('HAL_ADC_ErrorCallback')
 else:body+='void HAL_ADC_ErrorCallback(ADC_HandleTypeDef*h){(void)h;}\n'
-body+=fn('AdcCaptureRawInner');body+=fn('AdcCaptureRaw')
+body+=fn('HAL_ADC_ConvCpltCallback');body+=fn('AdcCaptureRawInner');body+=fn('AdcCaptureRaw');body+=fn('AdcCaptureStart');body+=fn('AdcCaptureCollect')
 main=r'''#define CHECK(x) do{if(!(x)){printf("FAIL line %d: %s\n",__LINE__,#x);failed++;}}while(0)
-int main(void){uint32_t us=0;
+int main(void){uint32_t us=0,t0=0;
  dwt.CYCCNT=UINT32_MAX-95999;
  CHECK(AdcCaptureRaw(2001,&us));CHECK(busy_seen>0);CHECK(slow_busy==0);CHECK(us==1500);CHECK(clean==1);CHECK(invalid==1);CHECK(alignment==0);
  CHECK(!AdcCaptureRaw(65536,&us));CHECK(!AdcCaptureRaw(0,&us));
@@ -55,6 +58,17 @@ int main(void){uint32_t us=0;
  mode=0;CHECK(AdcCaptureRaw(2001,&us));
  adc_done=1;adc_error=0;hadc1.ErrorCode=HAL_ADC_ERROR_OVR;HAL_ADC_ErrorCallback(&hadc1);CHECK(adc_error==0);
  adc_done=0;HAL_ADC_ErrorCallback(&hadc1);CHECK(adc_error==1);
+ /* ASYNC capture: Start returns at once and keeps slow_busy; the completion callback stops the continuous conversions; Collect restores everything */
+ mode=0;adc1_regs.CR2=0;adc1_regs.CR1=ADC_CR1_OVRIE;slow_busy=0;adc_async=0;adc_done=0;adc_error=0;invalid=0;clean=0;
+ CHECK(AdcCaptureStart(2001,&t0));CHECK(slow_busy==1);CHECK(adc_async==1);CHECK(adc1_regs.CR2&ADC_CR2_CONT);CHECK(clean==1);
+ HAL_ADC_ConvCpltCallback(&hadc1);CHECK(!(adc1_regs.CR2&ADC_CR2_CONT));CHECK(!(adc1_regs.CR1&ADC_CR1_OVRIE));
+ { int st=stops; CHECK(AdcCaptureCollect(2001,t0,&us));CHECK(stops==st+1);CHECK(slow_busy==0);CHECK(adc_async==0);CHECK(adc1_regs.CR2&ADC_CR2_CONT);CHECK(invalid==1);CHECK(alignment==0); }
+ adc1_regs.CR2=ADC_CR2_CONT;adc_async=0;HAL_ADC_ConvCpltCallback(&hadc1);CHECK(adc1_regs.CR2&ADC_CR2_CONT);   /* a blocking capture is never touched by the callback */
+ mode=1;CHECK(!AdcCaptureStart(2001,&t0));CHECK(slow_busy==0);CHECK(adc_async==0);CHECK(adc1_regs.CR2&ADC_CR2_CONT);
+ mode=2;adc_done=0;CHECK(AdcCaptureStart(2001,&t0));CHECK(slow_busy==1);CHECK(!AdcCaptureCollect(2001,t0,&us));CHECK(slow_busy==0);CHECK(adc_async==0);   /* never finished: timeout, busy flag released */
+ mode=3;CHECK(AdcCaptureStart(2001,&t0));CHECK(!AdcCaptureCollect(2001,t0,&us));CHECK(slow_busy==0);
+ mode=4;adc_done=0;CHECK(AdcCaptureStart(2001,&t0));adc_done=1;CHECK(!AdcCaptureCollect(2001,t0,&us));CHECK(slow_busy==0);CHECK(adc_async==0);mode=0;
+ CHECK(!AdcCaptureStart(0,&t0));CHECK(!AdcCaptureStart(65536,&t0));adc_tri_on=1;CHECK(!AdcCaptureStart(2001,&t0));adc_tri_on=0;CHECK(slow_busy==0);
  printf("DMA fault/cache/wrap failures=%d\n",failed);return failed?1:0;}
 '''
 (out/'dma.c').write_text(pre+body+'\n'+main)
