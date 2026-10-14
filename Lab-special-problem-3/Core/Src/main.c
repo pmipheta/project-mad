@@ -697,7 +697,7 @@ static void AtbSwitch(int ti)
 
 static void OscAutoTimebase(void)       /* เรียกทุกเฟรมหลังวัดค่า */
 {
-    static const uint8_t order[4] = { OSC_NT_FAST + 2, OSC_NT_FAST + 3, OSC_NT_FAST + 1, OSC_NT_FAST + 0 };
+    static const uint8_t order[4] = { OSC_NT_FAST + 1, OSC_NT_FAST + 0, OSC_NT_FAST + 2, OSC_NT_FAST + 3 };   /* 100, 50, 200, 500 ms/div: 2-60 Hz (the range just below FAST) first */
     uint32_t now, settle;
     float f, cyc;
 
@@ -1939,7 +1939,7 @@ failed:
  *   สลับ ADC: SLOW = single conversion (ปิด CONT/DMA)  <->  FAST = continuous + DMA (ค่าเดิมของ AdcCaptureRaw)
  * ========================================================================== */
 #define SLOW_MIN_TDIV_MS  50.0f           /* T/DIV ตั้งแต่ค่านี้ขึ้นไป = SLOW mode */
-#define SLOW_SPREAD_MAX   30u             /* ADC counts (~24 mV): burst spread above this = fast content */
+#define SLOW_SPREAD_MAX   150u            /* ADC counts (~120 mV): bursts on a real board show ~100 counts of noise even on a clean slow signal */
 
 static volatile uint16_t slow_ring[N_SAMPLES];
 static volatile uint32_t slow_head       = 0;   /* ตำแหน่งที่จะเขียนถัดไป (= จุดเก่าสุด) */
@@ -1976,6 +1976,7 @@ void OscSlowTick(void)
     {
         uint32_t acc = 0; uint16_t mn = 0xFFFF, mx = 0;
         for (uint32_t k = 0; k < SLOW_BURST; k++) {
+            for (volatile uint32_t d = (k * 3u) % 7u; d > 0u; d--) { }   /* dither the spacing so a signal at a multiple of the burst rate cannot hide inside the burst */
             uint16_t a = SlowAdcRead();
             acc += a; if (a < mn) mn = a; if (a > mx) mx = a;
         }
@@ -2013,6 +2014,7 @@ static void SlowSync(void)
         slow_active = 0;                                  /* หยุด ISR ก่อนแตะรีจิสเตอร์ */
 #ifndef OSC_SLOW_HOST_TEST
         if (slow_cfg_tdiv < 0) {                          /* เพิ่งเข้า SLOW จาก FAST (ADC หยุดอยู่แล้ว: AdcCaptureRaw เรียก Stop_DMA ทุกครั้ง) */
+            AdcSetRateLevel(1);                           /* SLOW reads in a burst: always 12 MHz / 15 cycles (1.25 us per conversion), not whatever the last FAST capture left behind */
             ADC1->CR2 &= ~(ADC_CR2_CONT | ADC_CR2_DMA | ADC_CR2_DDS);
             ADC1->CR2 |= ADC_CR2_ADON;
             for (volatile int d = 0; d < 3000; d++) { }   /* tSTAB หลังเปิด ADC */
@@ -2108,7 +2110,8 @@ static void SlowCaptureFrame(void)
         uint16_t spread = (uint16_t)(rsum / N_SAMPLES);
         dbg_slow_spread = spread;
         slow_fast_flag  = 0;
-        if (spread > SLOW_SPREAD_MAX) {
+        /* fast content = the 16-conversion burst spans a large part of the whole signal swing (a slow signal never does) */
+        if (spread > SLOW_SPREAD_MAX && (uint32_t)spread * 2u > (uint32_t)(vmax - vmin)) {
             slow_fast_flag = 1;                                        /* too fast for SLOW */
             osc_raw_freq   = 0.0f;                                     /* never show an aliased number */
         }
