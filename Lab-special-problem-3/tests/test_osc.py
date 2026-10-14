@@ -33,7 +33,7 @@ pre = '''#include <stdint.h>
 static float volts_per_div=1;
 static int16_t new_y[240];
 static int osc_plot_offset;
-static const float osc_tdivs_ms[]={.1f,.2f,.5f,1,2,5,6};
+static const float osc_tdivs_ms[]={.1f,.2f,.5f,1,2,5,6,50,100,200,500};
 static int osc_tdiv_i,osc_fwin=5,osc_calib=1,osc_trig_fall=0,osc_stable=1;
 static float osc_fs_eff,osc_offset_ct,osc_offset_v,osc_v[240];
 static char osc_det[8];
@@ -52,10 +52,12 @@ static float input_f=1000,phase=.31f,input_amp=620,input_dc=2048;
 static int wave;
 static uint32_t request_n,max_n;
 static int fail_capture;
-#define OSC_NT 7
+#define OSC_NT 11
+#define OSC_NT_FAST 7
 #define OSC_V_FILL_DIVS 5.2f
 #define OSC_FIT_CYCLES 2.5f
-static uint8_t osc_auto_stage,hold_active;
+static uint8_t osc_auto_stage,osc_auto_tries,hold_active,osc_auto_tb=1;
+static volatile uint8_t slow_active;
 static float dbg_auto_fsel;
 static int osc_vdiv_i;
 static const float osc_vdivs[]={.1f,.2f,.5f,1,2};
@@ -128,6 +130,6 @@ main='''int main(void){int failures=0;
  return failures?1:0;}
 '''
 (OUT/'regression.c').write_text(pre+body+main)
-subprocess.run(['clang','-O0',str(OUT/'regression.c'),'-o',str(OUT/'regression')],check=True)
+subprocess.run(['clang','-O0',str(OUT/'regression.c'),'-o',str(OUT/'regression'),'-lm'],check=True)
 r=subprocess.run([str(OUT/'regression')],text=True,capture_output=True)
 print(r.stdout,end='');raise SystemExit(r.returncode or bool(contract_failures))

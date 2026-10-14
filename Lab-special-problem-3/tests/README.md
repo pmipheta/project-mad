@@ -5,6 +5,8 @@ Run from the project directory:
 ```
 python3 tests/test_osc.py
 python3 tests/test_dma.py
+python3 tests/test_slow.py
+python3 tests/test_autotb.py
 python3 tests/build_arm.py
 ```
 
@@ -33,3 +35,11 @@ DMA fault/cache/wrap failures=5
 ```
 
 State-contract tests also failed for separate button AutoScale, decimated frequency selection, stale-capture processing, invalid-capture advancement, and missing explicit ADC-error display. Green tests include a 210-case frequency/timebase/filter sweep, raw square/DC/no-signal checks, display/cursor mapping, HOLD/AutoScale/recovery, and injected HAL/cache/DWT conditions. Real source compiled and linked with ARM GCC; no flash or commit is performed.
+
+## SLOW mode (T/DIV 50-500 ms, signals ~0.2-60 Hz)
+
+`test_slow.py` extracts the SLOW sampler from `main.c` (SLOW_BEGIN..SLOW_END) and runs it on a PC against a modelled ADC: frequency within 3 %, honest 0 Hz when fewer than 2 periods or below 50 mVpp, clipping visible, FAST<->SLOW switching. Not board verification. FAST measurement (40 Hz-100 kHz) is unchanged; below 40 Hz the frequency readout comes from the SLOW window.
+
+## AUTO time base
+
+`test_autotb.py` runs the FAST/SLOW switching logic (extracted from `main.c`, AUTO_TB_BEGIN..END) in a closed loop against a modelled measurement chain: 0.5 Hz..100 kHz settle on the right mode, 1 Hz<->1 kHz transitions, no switching without signal, bounded switching on pure noise, manual T/DIV and HOLD disable it. Manual T/DIV change pauses AUTO; `z` (or long SET) re-arms it. The readout shows `---` when the frequency is unknown. Not board verification.

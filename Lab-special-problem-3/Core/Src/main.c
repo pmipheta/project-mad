@@ -54,7 +54,8 @@
  * ========================================================================== */
 #define ADC_INPUT_ENABLE   1
 #define ADC_RAW_MAX        65520u  /* <=16-bit NDTR; whole 32-byte cache lines */
-#define OSC_NT             7        /* จำนวน T/DIV (p44: เพิ่ม 5.0 ms/div ให้ช่วง 40-100 Hz) */
+#define OSC_NT             11       /* จำนวน T/DIV ทั้งหมด (7 FAST + 4 SLOW) */
+#define OSC_NT_FAST        7        /* T/DIV 0..6 = FAST (burst DMA); 7..10 = SLOW (ring, SysTick) */
 #define ADC_SAMPLETIME_FAST ADC_SAMPLETIME_3CYCLES /* 12 MHz / 15 = 800 kSa/s */
 #define ADC_PRE_POINTS     120      /* จำนวนจุด "ก่อน trigger" (ครึ่งจอซ้าย) — p38 */
 
@@ -80,7 +81,7 @@
 
 /* --- Grid ------------------------------------------------------------------ */
 #define GRID_Y_STEP     40           /* px between horizontal grid lines        */
-#define GRID_Y_OFFSET   20           /* first grid line Y (just below header)   */
+#define GRID_Y_OFFSET   0            /* grid rows y=40,80,120,...: row 120 = CENTER_Y (0 V) */
 #define GRID_X_DOT      6            /* horizontal dot spacing                  */
 
 /* --- ADC reference --------------------------------------------------------- */
@@ -248,7 +249,8 @@ static void     DrawFps(float fps);
 
 static const char  *gen_wave_names[]  = {"SINE", "SQUARE", "TRI", "SAW"};
 static const float  osc_vdivs[]       = {0.1f, 0.2f, 0.5f, 1.0f, 2.0f};
-static const float  osc_tdivs_ms[]    = {0.1f, 0.2f, 0.5f, 1.0f, 2.0f, 5.0f, 6.0f};
+static const float  osc_tdivs_ms[]    = {0.1f, 0.2f, 0.5f, 1.0f, 2.0f, 5.0f, 6.0f,
+                                         50.0f, 100.0f, 200.0f, 500.0f};   /* 50..500 ms/div = SLOW mode (สัญญาณ ~0.2-60 Hz) */
 static const char  *osc_set_names[]   = {"FILTER", "TRIG", "V/DIV", "T/DIV"};
 static const char  *osc_hold_names[]  = {"C1", "C2", "V/DIV"};
 
@@ -280,6 +282,8 @@ static float    osc_fs_eff    = 100000.0f; /* sample rate สุทธิขอ�
 static char     osc_det[8]    = "---";     /* ชนิดคลื่นที่ตรวจได้               */
 static float    osc_v[N_SAMPLES];          /* ข้อมูลหลัง calibrate + filter    */
 static uint8_t  osc_frame_valid = 0;
+static volatile uint8_t slow_active = 0;  /* 1 = SLOW mode (T/DIV >= 50 ms) */
+static uint8_t  osc_auto_tb = 1;           /* 1 = firmware picks FAST/SLOW + T/DIV itself; 0 = manual (set by T/DIV keys, re-armed by 'z') */
 static float    osc_raw_freq = 0.0f, osc_raw_vpp = 0.0f;
 static float    osc_capture_tdiv = 1.0f;
 static uint32_t adc_measure_n = 3200u; /* adaptive, independent of display */
@@ -554,6 +558,7 @@ static void OscAdjust(int dir)      /* dir = +1 / -1 */
     } else if (!strcmp(name, "T/DIV")) {
         osc_tdiv_i = OscClampI(osc_tdiv_i + dir, 0, (int)(sizeof(osc_tdivs_ms) / sizeof(float)) - 1);
         /* New timebase takes effect only on the next capture. */
+        osc_auto_tb = 0;            /* manual choice wins until 'z' (AutoScale) re-arms AUTO */
     } else if (!strcmp(name, "C1")) {
         osc_c1 = OscClampI(osc_c1 + dir * 5, 0, N_SAMPLES - 1);
     } else if (!strcmp(name, "C2")) {
@@ -578,12 +583,15 @@ static void UartNum(const char *label, float v, const char *unit)
 /* One AutoScale state machine for UART z and long SET. Consume a fresh,
  * valid capture only; frequency and amplitude come from the raw acquisition. */
 static uint8_t osc_auto_stage = 0;
+static uint8_t osc_auto_tries = 0;   /* frames without a valid frequency */
 volatile float dbg_auto_fsel = 0.0f;
 
 static void OscAutoScale(void)
 {
     if (hold_active) return; /* HOLD never replaces or retimes its capture. */
     osc_auto_stage = 1;
+    osc_auto_tb = 1;                 /* z / long SET = back to AUTO time base */
+    osc_auto_tries = 0;
     osc_dirty = 1;
     UartPrint("\r\n AutoScale...\r\n");
 }
@@ -592,7 +600,14 @@ static void OscAutoScaleStep(void)
 {
     if (!osc_auto_stage || hold_active || !osc_frame_valid || !new_frame_ready) return;
     float f = osc_meas.freq;
-    if (!(f > 0.0f)) return; /* adaptive measurement still acquiring periods */
+    if (!(f > 0.0f)) {       /* adaptive measurement still acquiring periods */
+        /* FAST capture only sees >= 40 Hz: after ~15 frames look at the SLOW 200 ms/div window (2 s);
+         * give up (no periodic signal) after the SLOW window had time to fill. */
+        if (osc_auto_tries < 250u) osc_auto_tries++;
+        if (!slow_active && osc_auto_tries == 15u) { osc_tdiv_i = OSC_NT_FAST + 2; osc_dirty = 1; }
+        else if (slow_active && osc_auto_tries > 100u) { osc_auto_stage = 0; }
+        return;
+    }
     float vpp = ADC_INPUT_ENABLE ? osc_raw_vpp : osc_meas.vpp;
     int vi = (int)(sizeof(osc_vdivs) / sizeof(osc_vdivs[0])) - 1;
     for (int i = 0; i <= vi; i++) {
@@ -600,8 +615,12 @@ static void OscAutoScaleStep(void)
     }
     int ti = 0;
     float best = 1.0e30f;
-    for (int i = 0; i < OSC_NT; i++) {
-        float d = fabsf(f * osc_tdivs_ms[i] * OSC_H_DIVS / 1000.0f - OSC_FIT_CYCLES);
+    int k0 = 0, k1 = OSC_NT_FAST;                         /* >= 45 Hz: FAST bases (as before) */
+    if (f < 45.0f) { k0 = OSC_NT_FAST; k1 = OSC_NT; ti = OSC_NT_FAST + 2; }   /* slow signal: SLOW bases */
+    for (int i = k0; i < k1; i++) {
+        float cyc = f * osc_tdivs_ms[i] * OSC_H_DIVS / 1000.0f;
+        float d = fabsf(cyc - OSC_FIT_CYCLES);
+        if (k0 && cyc < 2.0f) d += 10.0f;                 /* SLOW: need >= 2 periods to measure */
         if (d < best) { best = d; ti = i; }
     }
     osc_vdiv_i = vi;
@@ -611,6 +630,101 @@ static void OscAutoScaleStep(void)
     osc_auto_stage = 0;
     osc_dirty = 1;
 }
+
+
+/* AUTO_TB_BEGIN =============================================================
+ * AUTO time base: เลือก FAST/SLOW และ T/DIV เองตามความถี่ที่วัดได้ (ปิดเมื่อผู้ใช้ปรับ T/DIV เอง; 'z' เปิดใหม่)
+ *   FAST (burst DMA)  วัดความถี่ได้ >= ~40 Hz       SLOW (SysTick ring) วัดได้ ~0.2-60 Hz
+ *   กฎ:  FAST + f<45 Hz  -> SLOW (เลือก T/DIV ให้เห็น >= 3 คาบ และ f <= Fs/8)
+ *        SLOW + f>55 Hz  -> FAST (เลือก T/DIV ให้เห็น ~2.5 คาบ)      (45-55 Hz = hysteresis กันสลับไปมา)
+ *        มีสัญญาณ (>=50 mVpp) แต่อ่านความถี่ไม่ได้นาน 2 s -> ไล่ลอง SLOW 200 -> 500 -> 100 -> 50 ms/div
+ *        แล้วกลับ FAST และหยุดลอง 120 s (กันจอกระโดดเมื่อเป็น noise ล้วน; สัญญาณหายแล้วกลับมา = เริ่มลองใหม่ทันที)
+ *   ไม่มีสัญญาณ = ไม่เปลี่ยนอะไร  |  HOLD / AutoScale กำลังทำงาน = ไม่ทำงาน
+ * ========================================================================== */
+#define ATB_FAST_TO_SLOW_HZ  45.0f
+#define ATB_SLOW_TO_FAST_HZ  55.0f
+#define ATB_BAD_MS           2000u
+#define ATB_BACKOFF_MS       120000u
+
+static uint32_t atb_t_switch  = 0;      /* tick ที่สลับครั้งล่าสุด */
+static uint32_t atb_t_bad     = 0;      /* tick ที่เริ่มเจอ "มีสัญญาณแต่อ่าน f ไม่ได้" (0 = ไม่เจอ) */
+static uint32_t atb_t_backoff = 0;      /* ห้ามเริ่มลองใหม่จนถึง tick นี้ */
+static uint8_t  atb_try       = 0;      /* ขั้นที่กำลังลองในลำดับ SLOW */
+volatile uint8_t dbg_atb_switches = 0;  /* จำนวนครั้งที่สลับ (ดูผ่าน SWD) */
+
+static int AtbPickFast(float f)         /* FAST base ที่ได้ ~2.5 คาบ */
+{
+    int ti = 0; float best = 1.0e30f;
+    for (int k = 0; k < OSC_NT_FAST; k++) {
+        float d = fabsf(f * osc_tdivs_ms[k] * (float)OSC_H_DIVS / 1000.0f - OSC_FIT_CYCLES);
+        if (d < best) { best = d; ti = k; }
+    }
+    return ti;
+}
+
+static int AtbPickSlow(float f)         /* SLOW base: >= 3 คาบ, f <= Fs/8, ใกล้ 4 คาบที่สุด */
+{
+    int ti = OSC_NT - 1; float best = 1.0e30f;
+    for (int k = OSC_NT_FAST; k < OSC_NT; k++) {
+        float cyc = f * osc_tdivs_ms[k] * (float)OSC_H_DIVS / 1000.0f;
+        float fs  = 24000.0f / osc_tdivs_ms[k];                /* = 240 / (T/DIV x 10) */
+        float d   = fabsf(cyc - 4.0f) + ((cyc >= 3.0f && f <= fs / 8.0f) ? 0.0f : 100.0f);
+        if (d < best) { best = d; ti = k; }
+    }
+    return ti;
+}
+
+static void AtbSwitch(int ti)
+{
+    if (ti == osc_tdiv_i) return;
+    osc_tdiv_i   = ti;
+    atb_t_switch = HAL_GetTick();
+    atb_t_bad    = 0;
+    osc_dirty    = 1;
+    dbg_atb_switches++;
+}
+
+static void OscAutoTimebase(void)       /* เรียกทุกเฟรมหลังวัดค่า */
+{
+    static const uint8_t order[4] = { OSC_NT_FAST + 2, OSC_NT_FAST + 3, OSC_NT_FAST + 1, OSC_NT_FAST + 0 };
+    uint32_t now, settle;
+    float f, cyc;
+
+    if (!osc_auto_tb || hold_active || osc_auto_stage || !osc_frame_valid) return;
+
+    now    = HAL_GetTick();
+    settle = (slow_active ? (uint32_t)(osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS) : 0u) + 1500u;
+    if ((now - atb_t_switch) < settle) return;              /* รอ ring เต็ม / ตัววัดวอร์มอัพ */
+
+    f = osc_meas.freq;
+    if (f > 0.0f) {                                         /* อ่านความถี่ได้ */
+        atb_t_bad = 0; atb_try = 0;
+        cyc = f * osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS / 1000.0f;
+        if (!slow_active) {
+            if (f < ATB_FAST_TO_SLOW_HZ)      AtbSwitch(AtbPickSlow(f));
+            else if (cyc < 1.2f || cyc > 12.0f) AtbSwitch(AtbPickFast(f));
+        } else {
+            if (f > ATB_SLOW_TO_FAST_HZ)      AtbSwitch(AtbPickFast(f));
+            else if (cyc < 3.0f || cyc > 30.0f || f > (24000.0f / osc_tdivs_ms[osc_tdiv_i]) / 9.0f)
+                AtbSwitch(AtbPickSlow(f));
+        }
+        return;
+    }
+
+    if (osc_raw_vpp < 0.05f) { atb_t_bad = 0; atb_try = 0; atb_t_backoff = 0; return; }   /* ไม่มีสัญญาณ: ไม่ทำอะไร + เปิดให้ลองใหม่ได้ทันทีเมื่อสัญญาณกลับมา */
+
+    /* มีสัญญาณ แต่อ่านความถี่ไม่ได้ */
+    if (!atb_t_bad) { atb_t_bad = now; return; }
+    if (!slow_active) {
+        if (now < atb_t_backoff) return;
+        if ((now - atb_t_bad) < ATB_BAD_MS) return;
+        atb_try = 1; AtbSwitch(order[0]);                   /* เริ่มลอง SLOW 200 ms/div */
+    } else {
+        if (atb_try < 4u) AtbSwitch(order[atb_try++]);      /* ลอง base ถัดไป (ผ่านช่วง settle แล้ว) */
+        else { atb_try = 0; atb_t_backoff = now + ATB_BACKOFF_MS; AtbSwitch(3); }  /* หมดลำดับ: กลับ FAST 1 ms/div */
+    }
+}
+/* AUTO_TB_END ============================================================== */
 
 static void UartPanel(void)
 {
@@ -630,6 +744,7 @@ static void UartPanel(void)
              hold_active ? "ON" : "OFF", osc_calib ? "AC" : "DC",
              osc_stable ? "AUTO" : "ROLL", osc_trig_fall ? "FALL" : "RISE", osc_det);
     UartPrint(b);
+    UartPrint(osc_auto_tb ? "\r\n TimeBase: AUTO (change T/DIV = manual, z = AUTO again)" : "\r\n TimeBase: MANUAL (z = AUTO)");
 
     UartPrint("\r\n== FUNCTION GENERATOR (input) ================");
     snprintf(b, sizeof(b), "\r\n Wave:%s  Freq:%d Hz",
@@ -637,7 +752,7 @@ static void UartPanel(void)
     UartPrint(b);
     UartNum("\r\n Amp:", gen_amp, " V");  UartNum("  DC:", gen_dc, " V");
     UartNum("  Noise:", gen_noise, " V");
-    snprintf(b, sizeof(b), "\r\n V/div:%d (%d.%d V)  T/div:%d (%d.%d ms)  Fs:%d kSa/s",
+    snprintf(b, sizeof(b), "\r\n V/div:%d (%d.%d V)  T/div:%d (%d.%d ms)  Fs:%d Sa/s",
              osc_vdiv_i, (int)osc_vdivs[osc_vdiv_i],
              (int)(osc_vdivs[osc_vdiv_i] * 10.0f) % 10,
              osc_tdiv_i, (int)(osc_tdivs_ms[osc_tdiv_i]), (int)(osc_tdivs_ms[osc_tdiv_i] * 10.0f) % 10,
@@ -972,12 +1087,12 @@ static void MapToScreen(int trig_offset)
 /* --------------------------------------------------------------------------
  * DrawGrid
  * Draw sparse dot-pattern grid once (at startup or after full screen clear).
- * Grid rows: y = 20, 60, 100, 140, 180, 220 (GRID_Y_OFFSET + n*GRID_Y_STEP)
+ * Grid rows: y = 40, 80, 120(centre), 160, 200 (GRID_Y_OFFSET + n*GRID_Y_STEP)
  * -------------------------------------------------------------------------- */
 static void DrawGrid(void)
 {
     for (int y = GRID_Y_OFFSET; y < SCREEN_H; y += GRID_Y_STEP)
-        for (int x = 0; x < SCREEN_W; x += GRID_X_DOT)
+        for (int x = 0; y >= WAVEFORM_TOP && x < SCREEN_W; x += GRID_X_DOT)
             ILI9341_Draw_Pixel((uint16_t)x, (uint16_t)y, DARKGREY);
 }
 
@@ -1131,6 +1246,9 @@ static void DrawSettingBar(void)
     snprintf((char *)dbg_lcd_bar, sizeof(dbg_lcd_bar), "%s", buf);
 }
 
+#if ADC_INPUT_ENABLE
+extern volatile uint16_t dbg_adc_min, dbg_adc_max;
+#endif
 static void DrawTopPanel(void)
 {
     char buf[20];
@@ -1189,10 +1307,14 @@ static void DrawTopPanel(void)
     ILI9341_Draw_Text(buf, 2, 10, CYAN, 1, BLACK);
 
     /* Frequency — x=68 */
-    if (osc_meas.freq >= 1000.0f)
-        snprintf(buf, sizeof(buf), "F:%.1fkHz", (double)(osc_meas.freq / 1000.0f));
-    else
-        snprintf(buf, sizeof(buf), "F:%.0fHz",  (double)osc_meas.freq);
+    {
+        char fb[16];
+        if (osc_meas.freq >= 1000.0f)     snprintf(fb, sizeof(fb), "%.1fkHz", (double)(osc_meas.freq / 1000.0f));
+        else if (osc_meas.freq >= 10.0f)  snprintf(fb, sizeof(fb), "%.0fHz",  (double)osc_meas.freq);
+        else if (osc_meas.freq > 0.0f)    snprintf(fb, sizeof(fb), "%.2fHz",  (double)osc_meas.freq);   /* <10 Hz: 2 decimals */
+        else                              snprintf(fb, sizeof(fb), "---");                            /* unknown, not "0 Hz" */
+        snprintf(buf, sizeof(buf), "F:%-8s", fb);
+    }
     ILI9341_Draw_Text(buf,72, 10, GREEN, 1, BLACK);
 
     /* RMS — x=245 (245 < 255, safe for uint8_t) */
@@ -1208,11 +1330,18 @@ static void DrawTopPanel(void)
     ILI9341_Draw_Text(buf, 72, 20, LIGHTGREY, 1, BLACK);
 
     /* โหมด trigger — AUTO:R / AUTO:F = จัดแนวให้นิ่ง, ROLL = ไถล */
-    if (osc_stable)
+    if (slow_active)
+        snprintf(buf, sizeof(buf), "SLOW  ");
+    else if (osc_stable)
         snprintf(buf, sizeof(buf), "AUTO:%s", osc_trig_fall ? "F" : "R");
     else
         snprintf(buf, sizeof(buf), "ROLL");
     ILI9341_Draw_Text(buf, 148, 20, CYAN, 1, BLACK);
+#if ADC_INPUT_ENABLE
+    /* CLIP: ADC ชน 0 หรือ 4095 => สัญญาณเกินช่วง 0-3.3 V (ยอดคลื่นแบนจริง ไม่ใช่บั๊กจอ) */
+    ILI9341_Draw_Text((osc_frame_valid && (dbg_adc_min <= 8u || dbg_adc_max >= 4087u)) ? "CLIP" : "    ",
+                      200, 20, RED, 1, BLACK);
+#endif
     }
 
 //    /* RMS — x=245 (245 < 255, safe for uint8_t) */
@@ -1597,6 +1726,175 @@ failed:
     osc_dirty = 1;
 }
 
+/* SLOW_BEGIN ================================================================
+ * SLOW mode (T/DIV >= 50 ms => หน้าต่าง >= 0.5 s) สำหรับสัญญาณความถี่ต่ำ เช่น 1 Hz
+ *   FAST เดิม: burst DMA ที่ ~800 kSa/s ลง adc_raw_buf (<= 65520 จุด = ~82 ms) จึงครอบคลุม 0.5-5 s ไม่ได้
+ *   SLOW ใหม่: SysTick (1 kHz) อ่าน ADC1 ทีละ 1 ค่า -> เฉลี่ยเป็นจุดแสดงผล 1 จุดทุก period_us
+ *              -> ring 240 จุด (เก่า -> ใหม่) = โหมดไถล (roll) ไม่ต้องรอ trigger
+ *   Fs ของจุดแสดงผล = 240 / (T/DIV x 10 ช่อง)  เช่น 200 ms/div -> 120 Sa/s (2 s ต่อหน้าจอ)
+ *   ความถี่ที่แสดงมาจากหน้าต่างนี้เอง (0.2-60 Hz) ไม่ใช่การสุ่มเร็วของโหมด FAST (>= 40 Hz)
+ *   สลับ ADC: SLOW = single conversion (ปิด CONT/DMA)  <->  FAST = continuous + DMA (ค่าเดิมของ AdcCaptureRaw)
+ * ========================================================================== */
+#define SLOW_MIN_TDIV_MS  50.0f           /* T/DIV ตั้งแต่ค่านี้ขึ้นไป = SLOW mode */
+
+static volatile uint16_t slow_ring[N_SAMPLES];
+static volatile uint32_t slow_head       = 0;   /* ตำแหน่งที่จะเขียนถัดไป (= จุดเก่าสุด) */
+static volatile uint32_t slow_filled     = 0;   /* 0 = ยังไม่มีข้อมูลเลย */
+static volatile uint32_t slow_period_us  = 2083;/* เวลาต่อ 1 จุดแสดงผล (us)              */
+static volatile uint32_t slow_phase_us   = 0;
+static volatile uint32_t slow_sum        = 0;
+static volatile uint32_t slow_cnt        = 0;
+static int               slow_cfg_tdiv   = -1;  /* T/DIV ที่ ring ถูกสร้างไว้ (-1 = ADC อยู่โหมด FAST) */
+volatile uint32_t        dbg_slow_pts    = 0;   /* นับจุดที่สร้างแล้ว (ดูผ่าน SWD) */
+volatile uint16_t        dbg_slow_last   = 0;
+
+#ifndef OSC_SLOW_HOST_TEST
+/* อ่าน ADC1 หนึ่งครั้ง (single conversion, polling ~1-2 us) */
+static inline uint16_t SlowAdcRead(void)
+{
+    uint32_t guard = 20000u;
+    ADC1->SR = 0;                              /* ล้าง EOC/OVR/STRT */
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    while (!(ADC1->SR & ADC_SR_EOC) && --guard) { }
+    return (uint16_t)(ADC1->DR & 0x0FFFu);
+}
+#endif
+
+/* เรียกจาก SysTick_Handler ทุก 1 ms */
+void OscSlowTick(void)
+{
+    if (!slow_active) return;
+
+    slow_sum += SlowAdcRead();
+    slow_cnt++;
+    slow_phase_us += 1000u;
+
+    if (slow_phase_us >= slow_period_us) {
+        slow_phase_us -= slow_period_us;
+        uint16_t v = (uint16_t)(slow_sum / slow_cnt);   /* boxcar: เฉลี่ยทุกค่าที่อ่านใน period นี้ */
+        slow_sum = 0; slow_cnt = 0;
+
+        if (slow_filled == 0) {                          /* จุดแรก: เติมทั้งหน้าต่างด้วยค่านี้ (เส้นราบ) แล้วไถลต่อ */
+            for (uint32_t i = 0; i < N_SAMPLES; i++) slow_ring[i] = v;
+            slow_filled = 1;
+        }
+        slow_ring[slow_head] = v;
+        slow_head = (slow_head + 1u) % N_SAMPLES;
+        dbg_slow_pts++;
+        dbg_slow_last = v;
+    }
+}
+
+/* ตั้ง/คืนโหมด ADC และ ring ให้ตรงกับ T/DIV ปัจจุบัน — เรียกก่อนจับเฟรมทุกครั้ง (ไม่เรียกตอน HOLD) */
+static void SlowSync(void)
+{
+    uint8_t want = (osc_tdivs_ms[osc_tdiv_i] >= SLOW_MIN_TDIV_MS);
+
+    if (want && slow_cfg_tdiv != osc_tdiv_i) {
+        slow_active = 0;                                  /* หยุด ISR ก่อนแตะรีจิสเตอร์ */
+#ifndef OSC_SLOW_HOST_TEST
+        if (slow_cfg_tdiv < 0) {                          /* เพิ่งเข้า SLOW จาก FAST (ADC หยุดอยู่แล้ว: AdcCaptureRaw เรียก Stop_DMA ทุกครั้ง) */
+            ADC1->CR2 &= ~(ADC_CR2_CONT | ADC_CR2_DMA | ADC_CR2_DDS);
+            ADC1->CR2 |= ADC_CR2_ADON;
+            for (volatile int d = 0; d < 3000; d++) { }   /* tSTAB หลังเปิด ADC */
+        }
+#endif
+        slow_period_us = (uint32_t)(osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS * 1000.0f / (float)N_SAMPLES);
+        slow_phase_us = 0; slow_sum = 0; slow_cnt = 0;
+        slow_head = 0; slow_filled = 0;
+        slow_cfg_tdiv = osc_tdiv_i;
+        slow_active = 1;
+    } else if (!want && slow_cfg_tdiv >= 0) {             /* กลับ FAST: continuous + DMA ตามเดิม */
+        slow_active = 0;
+#ifndef OSC_SLOW_HOST_TEST
+        ADC1->CR2 &= ~ADC_CR2_ADON;
+        ADC1->SR = 0;
+        ADC1->CR2 |= ADC_CR2_CONT;
+#endif
+        slow_cfg_tdiv = -1;
+    }
+}
+
+/* ความถี่จากหน้าต่าง SLOW (raw_samples[]): จุดตัดกึ่งกลางขาขึ้น + hysteresis 20% — ต้องมี >= 2 ขอบ
+ * (FAST ใช้ >= 3 ขอบ แต่ที่นี่หน้าต่าง 2-5 คาบ) คืน 0 ถ้าไม่พอ — ไม่แต่งตัวเลข */
+static float SlowRawFrequency(float fs)
+{
+    uint16_t mn = 4095, mx = 0;
+    for (uint32_t i = 0; i < N_SAMPLES; i++) {
+        uint16_t v = (uint16_t)raw_samples[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+    osc_raw_vpp = (float)(mx - mn) * ADC_VREF / ADC_FULL;
+    if (osc_raw_vpp < 0.05f) return 0.0f;
+    float mid = (float)(mx + mn) * 0.5f, hyst = (float)(mx - mn) * 0.2f;
+    float first = 0.0f, last = 0.0f;
+    uint32_t edges = 0;
+    int armed = 0;
+    for (uint32_t i = 1; i < N_SAMPLES; i++) {
+        float prev = (float)raw_samples[i - 1], v = (float)raw_samples[i];
+        if (v < mid - hyst) armed = 1;
+        if (armed && prev < mid && v >= mid) {
+            float at = (float)(i - 1) + (mid - prev) / (v - prev);
+            if (!edges) first = at;
+            last = at;
+            edges++;
+            armed = 0;
+        }
+    }
+    if (edges < 2 || last <= first) return 0.0f;
+    float f = (float)(edges - 1) * fs / (last - first);
+    return (f >= 0.2f && f <= fs / 8.0f) ? f : 0.0f;
+}
+
+/* ดึง ring (เก่า -> ใหม่) ลง raw_samples[] เหมือน AdcCaptureFrame() และตั้งค่า osc_* ที่ตัวแสดงผล/วัดค่าต้องใช้ */
+static void SlowCaptureFrame(void)
+{
+    uint16_t vmin = 0xFFFF, vmax = 0;
+    uint32_t pm;
+
+    new_frame_ready = 0;
+    osc_frame_valid = 0;
+    osc_raw_freq = osc_raw_vpp = 0.0f;
+    osc_meas = (OscMeasure){0};
+    strcpy(osc_det, "INVALID");
+
+#ifndef OSC_SLOW_HOST_TEST
+    {   /* จุดแรกของ ring มาถึงภายใน 1 period (<= ~21 ms) — รอสั้น ๆ แทนการขึ้น ADC ERR */
+        uint32_t t0 = HAL_GetTick();
+        while (!slow_filled && (HAL_GetTick() - t0) < 80u) { }
+    }
+#endif
+    if (!slow_filled) { dbg_adc_ok = 0; osc_dirty = 1; return; }
+
+    pm = __get_PRIMASK();
+    __disable_irq();
+    {
+        uint32_t h = slow_head;
+        for (uint32_t i = 0; i < N_SAMPLES; i++) {
+            uint16_t v = slow_ring[(h + i) % N_SAMPLES];
+            raw_samples[i] = (int16_t)v;
+            if (v < vmin) vmin = v;
+            if (v > vmax) vmax = v;
+        }
+    }
+    __set_PRIMASK(pm);
+
+    osc_fs_eff       = 1000000.0f / (float)slow_period_us;     /* Fs จริงของจุดแสดงผล */
+    osc_raw_freq     = SlowRawFrequency(osc_fs_eff);
+    osc_capture_tdiv = osc_tdivs_ms[osc_tdiv_i];
+    dbg_adc_ok       = 1;
+    dbg_adc_min      = vmin;
+    dbg_adc_max      = vmax;
+    dbg_adc_frames++;
+    osc_frame_valid  = 1;
+    new_frame_ready  = 1;
+    osc_dirty        = 1;
+}
+/* SLOW_END ================================================================= */
+
+#else  /* !ADC_INPUT_ENABLE */
+void OscSlowTick(void) { }
 #endif /* ADC_INPUT_ENABLE */
 
 /* USER CODE END 0 */
@@ -1745,7 +2043,9 @@ int main(void)
                  * ทีม sampling ต่อข้อมูลจริงตรงนี้ (แทน GenFrame)                    */
                 if (!hold_active) {               /* HOLD = freeze ข้อมูลไว้ ไม่ generate ใหม่ */
 #if ADC_INPUT_ENABLE
-                    AdcCaptureFrame();            /* p30: อ่านข้อมูลจริงจาก ADC (PA0) */
+                    SlowSync();                   /* T/DIV >= 50 ms -> SLOW (ring), ไม่งั้น FAST (burst) */
+                    if (slow_active) SlowCaptureFrame();
+                    else             AdcCaptureFrame();   /* p30: อ่านข้อมูลจริงจาก ADC (PA0) */
                     if (!osc_frame_valid) goto skip_draw;
 #else
                     osc_capture_tdiv = osc_tdivs_ms[osc_tdiv_i];
@@ -1762,6 +2062,7 @@ int main(void)
                 OscMeasureFrame();      /* วัดค่า Vmax/Vmin/Vpp/RMS/Freq + ชนิดคลื่น */
                 /* AutoScale ขั้น 2: พอวัดใหม่ที่ time base เร็วสุดแล้ว -> เลือกสเกล */
                 if (osc_auto_stage) OscAutoScaleStep();
+                OscAutoTimebase();      /* AUTO: สลับ FAST/SLOW + T/DIV ตามความถี่ (ถ้าไม่ได้ปรับเอง) */
                 new_frame_ready = 0;
 
 #if SHOW_FPS
