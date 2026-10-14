@@ -2,7 +2,7 @@
 from pathlib import Path
 import re, subprocess, os
 ROOT = Path(__file__).resolve().parents[1]
-OUT = (Path.home()/'.hermes/cache/scratch') / 'osc_regression'
+OUT = Path(__import__('tempfile').gettempdir()) / 'osc_regression'
 OUT.mkdir(parents=True, exist_ok=True)
 s = re.sub(r'/\*.*?\*/', '', (ROOT/'Core/Src/main.c').read_text(), flags=re.S)
 def function(name):
@@ -33,7 +33,7 @@ pre = '''#include <stdint.h>
 static float volts_per_div=1;
 static int16_t new_y[240];
 static int osc_plot_offset;
-static const float osc_tdivs_ms[]={.1f,.2f,.5f,1,2,5,6,50,100,200,500};
+static const float osc_tdivs_ms[]={.005f,.01f,.015f,.02f,.05f,.1f,.2f,.5f,1,2,5,6,50,100,200,500};
 static int osc_tdiv_i,osc_fwin=5,osc_calib=1,osc_trig_fall=0,osc_stable=1;
 static float osc_fs_eff,osc_offset_ct,osc_offset_v,osc_v[240];
 static char osc_det[8];
@@ -43,7 +43,6 @@ static OscMeasure osc_meas;
 static uint8_t osc_frame_valid;
 static float osc_raw_freq,osc_raw_vpp,osc_capture_tdiv;
 static uint32_t adc_measure_n=3200;
-static uint8_t AdcSetRate(int slow);
 static float dbg_adc_rate=800000,dbg_adc_step;
 static uint32_t dbg_adc_start,dbg_adc_decim,dbg_adc_n,dbg_adc_us,dbg_adc_frames;
 static uint16_t dbg_adc_min,dbg_adc_max;
@@ -52,8 +51,13 @@ static float input_f=1000,phase=.31f,input_amp=620,input_dc=2048;
 static int wave;
 static uint32_t request_n,max_n;
 static int fail_capture;
-#define OSC_NT 11
-#define OSC_NT_FAST 7
+#define OSC_NT 16
+#define OSC_NT_FAST 12
+#define OSC_TDIV_DEF 8
+#define ADC_RATE_LEVELS 5
+#define ADC_MEAS_LEVELS 3
+static uint8_t adc_meas_lvl,dbg_adc_lvl,adc_too_fast,adc_tri_on,adc_fast_content,adc_over_range;static float adc_hold_f;static uint32_t adc_hold_t,adc_over_t;static float adc_rough_ratio;static uint32_t tick_ms;static uint32_t HAL_GetTick(void){tick_ms+=40;return tick_ms;}static const uint8_t adc_meas_seq[3]={1,0,4};
+static float AdcRateHz(int l);static uint8_t AdcSetRateLevel(int l);
 #define OSC_V_FILL_DIVS 5.2f
 #define OSC_FIT_CYCLES 2.5f
 static uint8_t osc_auto_stage,osc_auto_tries,hold_active,osc_auto_tb=1;
@@ -65,7 +69,8 @@ static void UartPrint(const char*s){(void)s;}
 static uint8_t AdcCaptureRaw(uint32_t n,uint32_t *us);
 '''
 pre += '#define ADC_RAW_MAX '+macro('ADC_RAW_MAX')+'\nstatic uint16_t adc_raw_buf[ADC_RAW_MAX];\n'
-pre += '''static uint8_t AdcSetRate(int slow){dbg_adc_rate=12000000.0f/(slow?27:15);return 1;}
+pre += '''static float AdcRateHz(int l){static const float t[5]={1600000.f,800000.f,12000000.f/27,300000.f,4800000.f};return t[l];}
+static uint8_t AdcSetRateLevel(int l){dbg_adc_rate=AdcRateHz(l);adc_tri_on=(l==4);return 1;}
 static uint8_t AdcCaptureRaw(uint32_t n,uint32_t *us){
  if(fail_capture)return 0;
  request_n=n;if(n>max_n)max_n=n;
@@ -94,21 +99,40 @@ main='''int main(void){int failures=0;
  for(int i=0;i<240;i++)raw_samples[i]=3000;OscProcessFrame();MapToScreen(0);
  printf("calibrated DC pixel %d expected 120\\n",new_y[0]);if(new_y[0]!=120)failures++;
  float freq[]={100,20000};
- for(int k=0;k<2;k++) {osc_tdiv_i=k?3:0; input_f=freq[k];for(int settle=0;settle<6;settle++) AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();
+ for(int k=0;k<2;k++) {osc_tdiv_i=k?8:5; input_f=freq[k];for(int settle=0;settle<6;settle++) AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();
  printf("frequency %.0f -> %.2f\\n",input_f,osc_meas.freq);
  if(fabsf(osc_meas.freq/input_f-1)>.02f) failures++;
  }
- osc_tdiv_i=6;AdcCaptureFrame();printf("DMA request %u limit 65535\\n",request_n);if(request_n>65535) failures++;
+ osc_tdiv_i=11;AdcCaptureFrame();printf("DMA request %u limit 65535\\n",request_n);if(request_n>65535) failures++;
  int cases=0;
  float sweep[]={40,50,100,500,999,1000,10001,20000,48000,100000};
- for(int ti=0;ti<7;ti++)for(int fi=0;fi<10;fi++)for(int filter=1;filter<=21;filter+=10){
+ for(int ti=0;ti<12;ti++)for(int fi=0;fi<10;fi++)for(int filter=1;filter<=21;filter+=10){
   osc_tdiv_i=ti;osc_fwin=filter;input_f=sweep[fi];phase=.17f+fi*.29f;adc_measure_n=3200;
-  for(int settle=0;settle<7;settle++)AdcCaptureFrame();
+  for(int settle=0;settle<16;settle++)AdcCaptureFrame();
   OscProcessFrame();OscMeasureFrame();cases++;
   if(!osc_frame_valid||fabsf(osc_meas.freq/input_f-1)>.02f){printf("FAIL sweep %d %.0f filter%d ->%.3f\\n",ti,input_f,filter,osc_meas.freq);failures++;}
   float expected=240/(osc_tdivs_ms[ti]*.01f);
   if(fabsf(osc_fs_eff/expected-1)>.0001f)failures++;
  }
+ float hf[]={150000,200000,300000,500000,800000,1000000,1150000,1500000,1800000,2000000,2100000};osc_tdiv_i=0;
+ for(int fi=0;fi<11;fi++){input_f=hf[fi];adc_measure_n=3200;adc_meas_lvl=0;osc_fwin=1;for(int s=0;s<12;s++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();cases++;
+  printf("HF %.0f -> %.1f\\n",input_f,osc_meas.freq);if(!osc_frame_valid||fabsf(osc_meas.freq/input_f-1)>.02f){printf("FAIL HF %.0f\\n",input_f);failures++;}}
+ input_f=900000;adc_measure_n=3200;adc_meas_lvl=0;osc_tdiv_i=0;for(int s=0;s<12;s++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();
+ printf("900 kHz alias check -> %.1f\\n",osc_meas.freq);if(fabsf(osc_meas.freq/900000-1)>.02f){printf("FAIL alias 900k\\n");failures++;}
+ input_f=2300000;adc_measure_n=3200;adc_meas_lvl=0;for(int s=0;s<12;s++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();
+ printf("HF above limit 2300000 -> %.1f over_range=%d (must be 0, 1)\\n",osc_meas.freq,adc_over_range);if(!adc_over_range)failures++;
+ {int bad=0; float nq[]={2400000,2395000,2405000,2450000,2600000,3000000};
+  for(int k=0;k<6;k++){input_f=nq[k];for(int ph=0;ph<20;ph++){phase=.1f+ph*.31f;adc_measure_n=3200;adc_meas_lvl=2;adc_hold_f=0;for(int s=0;s<3;s++)AdcCaptureFrame();
+   if(osc_raw_freq>0&&fabsf(osc_raw_freq/input_f-1)>.02f&&fabsf(osc_raw_freq/(4800000-input_f)-1)>.02f){bad++;}}}
+  printf("Nyquist-region false readings: %d (must be 0)\\n",bad);if(bad)failures++;}
+ {   /* 2.4 MHz = 3 x 800 kSa/s aliases to DC; a 33 kHz clock-offset beat must be rejected from the 800 kSa/s level */
+  input_f=2400000*1.0137;adc_measure_n=3200;adc_meas_lvl=0;adc_hold_f=0;int shown=0;
+  for(int s=0;s<8;s++){AdcCaptureFrame();if(osc_raw_freq>0&&fabsf(osc_raw_freq/input_f-1)>.02f)shown++;}
+  printf("alias-to-low (2.43 MHz seen at 800k): wrong numbers %d (must be 0)\\n",shown);if(shown)failures++;}
+ /* hold: a good 1 kHz reading survives <1.5 s of failed frames, then goes away; no hold without signal */
+ input_f=1000;adc_measure_n=3200;adc_meas_lvl=0;for(int s=0;s<8;s++)AdcCaptureFrame();float good=osc_raw_freq;fail_capture=0;
+ if(good<900||good>1100){printf("FAIL hold setup %.1f\\n",good);failures++;}
+ input_amp=0;AdcCaptureFrame();if(osc_raw_freq!=0){printf("FAIL hold with no signal\\n");failures++;}input_amp=620;if(osc_meas.freq!=0)failures++;
  printf("sweep %d cases, max DMA %u\\n",cases,max_n);if(max_n>65535)failures++;
  float saved_fs=osc_fs_eff,saved_td=osc_capture_tdiv;
  hold_active=1;osc_auto_stage=0;AutoScale();if(osc_auto_stage||osc_fs_eff!=saved_fs)failures++;
@@ -116,7 +140,7 @@ main='''int main(void){int failures=0;
  if(osc_frame_valid||new_frame_ready||osc_meas.freq||dbg_adc_ok||osc_auto_stage!=1)failures++;
  if(osc_fs_eff!=saved_fs||osc_capture_tdiv!=saved_td)failures++;
  fail_capture=0;input_f=20000;AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();OscAutoScaleStep();
- if(!osc_frame_valid||!dbg_adc_ok||osc_auto_stage||osc_tdiv_i!=0||volts_per_div!=osc_vdivs[osc_vdiv_i])failures++;
+ if(!osc_frame_valid||!dbg_adc_ok||osc_auto_stage||(osc_tdiv_i!=1&&osc_tdiv_i!=2)||volts_per_div!=osc_vdivs[osc_vdiv_i])failures++;
  input_amp=0;for(int i=0;i<7;i++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();if(osc_meas.freq!=0)failures++;
  input_amp=10;for(int i=0;i<7;i++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();if(osc_meas.freq!=0)failures++;
  input_amp=620;input_dc=2600;wave=1;

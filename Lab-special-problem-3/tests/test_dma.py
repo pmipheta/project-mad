@@ -3,7 +3,7 @@ from pathlib import Path
 import re, subprocess, os
 root=Path(__file__).resolve().parents[1]
 s=(root/'Core/Src/main.c').read_text()
-out=(Path.home()/'.hermes/cache/scratch')/'osc_regression';out.mkdir(exist_ok=True)
+out=Path(__import__('tempfile').gettempdir())/'osc_regression';out.mkdir(exist_ok=True)
 def fn(name):
  m=re.search(r'^(?:static\s+)?(?:inline\s+)?(?:void|uint8_t|uint32_t)\s+'+name+r'\([^;]*?\)\s*\{',s,re.M);assert m,name
  i=s.index('{',m.start())+1;d=1
@@ -23,6 +23,7 @@ static struct {uint32_t CYCCNT;} dwt;
 #define DWT (&dwt)
 static uint16_t adc_raw_buf[ADC_RAW_MAX] __attribute__((aligned(32)));
 static volatile uint8_t adc_done,adc_error;
+static uint8_t adc_tri_on=0;static uint8_t AdcCaptureTriple(uint32_t n,uint32_t*t){(void)n;(void)t;return 0;}
 static int mode,stops,clean,invalid,alignment,failed;
 static uint32_t tick;
 static uint32_t HAL_RCC_GetHCLKFreq(void){return 96000000;}
