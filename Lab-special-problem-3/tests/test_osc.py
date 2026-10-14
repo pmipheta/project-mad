@@ -34,7 +34,7 @@ static float volts_per_div=1;
 static int16_t new_y[240];
 static int osc_plot_offset;
 static const float osc_tdivs_ms[]={.005f,.01f,.015f,.02f,.05f,.1f,.2f,.5f,1,2,5,6,10,20,50,100,200,500};
-static int osc_tdiv_i,osc_fwin=5,osc_calib=1,osc_trig_fall=0,osc_stable=1;
+static int osc_tdiv_i,osc_fwin=5,osc_calib=1,osc_trig_fall=0,osc_stable=1,osc_lock_auto=1;
 static float osc_fs_eff,osc_offset_ct,osc_offset_v,osc_v[240];
 static char osc_det[8];
 static int16_t raw_samples[240];

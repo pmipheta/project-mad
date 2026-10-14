@@ -278,7 +278,8 @@ static uint8_t  osc_calib     = 1;         /* AC coupling (calibrate offset)   *
 static uint8_t  osc_dirty     = 1;         /* สั่งวาดใหม่แม้อยู่โหมด HOLD         */
 
 /* โหมดจอ (ดูโหมดที่ใช้อยู่ได้ที่บรรทัด Trig: ในหน้ารายงาน / บนจอ LCD) */
-static uint8_t  osc_stable    = 1;   /* 1 = นิ่ง (trigger) | 0 = ไถล (roll)  */
+static uint8_t  osc_stable    = 1;   /* 1 = AUTO: the picture locks to the trigger edge from 45 Hz up (both modes), rolls below | 0 = always roll (UART 'r') */
+static uint8_t  osc_lock_auto = 0;   /* set by the auto time base: 1 while the signal is >= 45 Hz (hysteresis 35 / 45 Hz) */   /* 1 = นิ่ง (trigger) | 0 = ไถล (roll)  */
 static int      trig_hold     = 0;   /* trigger offset ล่าสุดที่ใช้          */
 static int      dbg_trig_off  = 0;   /* เก็บไว้ตรวจย้อนหลังผ่าน SWD          */
 static float    osc_offset_ct = (float)ADC_MID;
@@ -683,6 +684,7 @@ static void OscAutoScaleStep(void)
 
 
 static float SlowProbeFreq(int ti);          /* defined in the SLOW block */
+static uint8_t SlowSlowish(void);            /* defined in the SLOW block: 1 = the newest history is a clearly moving, clearly slow signal */
 
 static uint8_t SlowRecentFlat(void);   /* 1 = the newest 1.5 s of the slow history is flat (the signal has stopped) */
 /* AUTO_TB_BEGIN =============================================================
@@ -694,13 +696,15 @@ static uint8_t SlowRecentFlat(void);   /* 1 = the newest 1.5 s of the slow histo
  *        SLOW อ่านไม่ได้ -> ลอง base อื่นจากประวัติ ถ้าไม่ได้ 1.5 s -> FAST
  *   ไม่มีสัญญาณ = ไม่เปลี่ยนอะไร  |  HOLD / AutoScale กำลังทำงาน = ไม่ทำงาน
  * ========================================================================== */
-#define ATB_FAST_TO_SLOW_HZ  45.0f
-#define ATB_SLOW_TO_FAST_HZ  55.0f
+#define ATB_FAST_TO_SLOW_HZ  70.0f
+#define ATB_SLOW_TO_FAST_HZ  90.0f
 #define ATB_BAD_MS           1500u
+#define ATB_FAST_CYC         6.0f     /* FAST: the window should show about this many cycles (SLOW shows 5-9 at the hand-off) */
 
 static uint32_t atb_t_switch  = 0;      /* tick of the last switch */
 static uint32_t atb_t_bad     = 0;      /* tick when SLOW first had a signal it could not read (0 = no) */
 static uint32_t atb_t_probe   = 0;      /* tick of the last history probe */
+static uint8_t  atb_slowish_n = 0;      /* consecutive probes that saw a slow moving signal while FAST could read nothing */
 static float    atb_last_f    = 0.0f;   /* last frequency that was read in either mode (used by the manual toggle) */
 static uint8_t  atb_last_fast = 0xFFu;  /* last FAST time base that gave a reading (0xFF = none yet) */
 static uint32_t atb_last_fast_t = 0;    /* tick when it was set */
@@ -712,27 +716,30 @@ static int AtbPickFast(float f)         /* FAST base ที่ได้ ~2.5 ค
 {
     int ti = 0; float best = 1.0e30f;
     for (int k = 0; k < OSC_NT_FAST; k++) {
-        float d = fabsf(f * osc_tdivs_ms[k] * (float)OSC_H_DIVS / 1000.0f - OSC_FIT_CYCLES);
+        float d = fabsf(f * osc_tdivs_ms[k] * (float)OSC_H_DIVS / 1000.0f - ATB_FAST_CYC);
         if (d < best) { best = d; ti = k; }
     }
     return ti;
 }
 
-static int AtbPickSlow(float f)         /* SLOW base: >= 3 คาบ, f <= Fs/8, ใกล้ 4 คาบที่สุด */
+static int AtbPickSlow(float f)         /* SLOW base for frequency f. One base covers a WIDE range, so neighbouring frequencies (4, 5, 6 Hz; 11 -> 1 Hz; 20 -> 10 Hz) keep the same
+                                         * time base and the picture just stretches like the signal does. The frequency is measured on whichever window can read it. */
 {
-    int ti = OSC_NT - 1; float best = 1.0e30f;
-    for (int k = OSC_NT_FAST; k < OSC_NT; k++) {
-        float cyc = f * osc_tdivs_ms[k] * (float)OSC_H_DIVS / 1000.0f;
-        float fs  = 24000.0f / osc_tdivs_ms[k];                /* = 240 / (T/DIV x 10) */
-        float d   = fabsf(cyc - 4.0f) + ((cyc >= 3.5f && f <= fs / 8.0f) ? 0.0f : 100.0f);
-        if (d < best) { best = d; ti = k; }
-    }
-    return ti;
+    if (f <  0.9f)  return OSC_NT - 1;     /* 0.2 - 0.9 Hz : 500 ms/div */
+    if (f < 12.0f)  return OSC_NT - 2;     /* 0.9 - 12 Hz  : 200 ms/div (1 Hz = 2 cycles, 12 Hz = 24 cycles) */
+    if (f < 45.0f)  return OSC_NT - 4;     /* 12 - 45 Hz   :  50 ms/div */
+    return OSC_NT - 6;                     /* 45 Hz and up :  10 ms/div (4.5 cycles at 45 Hz, 9 at 90 Hz: close to what FAST shows) */
 }
 
+volatile uint8_t dbg_atb_why = 0, dbg_atb_from = 0, dbg_atb_to = 0;   /* last switch: reason code, old base, new base */
+volatile float   dbg_atb_arg = 0.0f;                                  /* the frequency that decided it */
+volatile uint32_t dbg_atb_log[8];                                      /* ring of the last 8 switches: (why<<16)|(from<<8)|to */
+volatile uint8_t  dbg_atb_log_i = 0;
 static void AtbSwitch(int ti)
 {
     if (ti == osc_tdiv_i) return;
+    dbg_atb_from = (uint8_t)osc_tdiv_i; dbg_atb_to = (uint8_t)ti;
+    dbg_atb_log[dbg_atb_log_i & 7u] = ((uint32_t)dbg_atb_why << 16) | ((uint32_t)osc_tdiv_i << 8) | (uint32_t)ti; dbg_atb_log_i++;
     osc_tdiv_i   = ti;
     atb_t_switch = HAL_GetTick();
     atb_t_bad    = 0;
@@ -761,26 +768,26 @@ static void OscAutoTimebase(void)       /* called every frame after measuring */
     float f, cyc, pf;
     int ti;
 
-    if (osc_meas.freq > 0.0f && osc_frame_valid) { atb_last_f = osc_meas.freq; if (!slow_active) { atb_last_fast = (uint8_t)osc_tdiv_i; atb_last_fast_t = HAL_GetTick(); } }
+    if (osc_meas.freq > 0.0f && osc_frame_valid) { atb_last_f = osc_meas.freq; if (osc_meas.freq >= 45.0f) osc_lock_auto = 1; else if (osc_meas.freq < 35.0f) osc_lock_auto = 0; if (!slow_active) { atb_last_fast = (uint8_t)osc_tdiv_i; atb_last_fast_t = HAL_GetTick(); } }
     if (!osc_auto_tb || hold_active || osc_auto_stage || !osc_frame_valid) return;
 
     now = HAL_GetTick();
     if ((now - atb_t_switch) < 300u) return;                  /* let the new setting produce a frame first */
 
     /* SLOW saw a fast signal: back to FAST at once */
-    if (slow_active && slow_fast_flag) { atb_t_bad = 0; AtbSwitch(AtbFastFallback(now)); return; }
+    if (slow_active && slow_fast_flag) { atb_t_bad = 0; dbg_atb_why = 1; dbg_atb_arg = 0.0f; AtbSwitch(AtbFastFallback(now)); return; }
 
     f = osc_meas.freq;
     if (f > 0.0f) {                                           /* readable */
         atb_t_bad = 0;
         cyc = f * osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS / 1000.0f;
         if (!slow_active) {
-            if (f < ATB_FAST_TO_SLOW_HZ)        AtbSwitch(AtbPickSlow(f));
-            else if (cyc < 1.2f || cyc > 12.0f) AtbSwitch(AtbPickFast(f));
+            if (f < ATB_FAST_TO_SLOW_HZ)        { dbg_atb_why = 4; dbg_atb_arg = f; AtbSwitch(AtbPickSlow(f)); }
+            else if (cyc < 3.0f || cyc > 14.0f) { dbg_atb_why = 5; dbg_atb_arg = f; AtbSwitch(AtbPickFast(f)); }
         } else {
-            if (f > ATB_SLOW_TO_FAST_HZ)        AtbSwitch(AtbPickFast(f));
-            else if (cyc < 3.2f || cyc > 30.0f || f > (24000.0f / osc_tdivs_ms[osc_tdiv_i]) / 9.0f)
-                AtbSwitch(AtbPickSlow(f));
+            if (f > ATB_SLOW_TO_FAST_HZ)        { dbg_atb_why = 2; dbg_atb_arg = f; AtbSwitch(AtbPickFast(f)); }
+            else if (cyc < 1.6f || f > (24000.0f / osc_tdivs_ms[osc_tdiv_i]) / 9.0f || (osc_tdiv_i == OSC_NT - 1 && f > 1.2f))
+                { dbg_atb_why = 3; dbg_atb_arg = f; AtbSwitch(AtbPickSlow(f)); }
         }
         return;
     }
@@ -792,7 +799,11 @@ static void OscAutoTimebase(void)       /* called every frame after measuring */
         if ((now - atb_t_probe) < 250u) return;
         atb_t_probe = now;
         ti = AtbProbeSlow(-1, &pf);
-        if (ti >= 0 && pf < ATB_FAST_TO_SLOW_HZ) AtbSwitch(AtbPickSlow(pf));
+        if (ti >= 0 && pf < ATB_FAST_TO_SLOW_HZ) { dbg_atb_why = 6; dbg_atb_arg = pf; atb_slowish_n = 0; AtbSwitch(AtbPickSlow(pf)); }
+        else if (ti < 0 && SlowSlowish()) {                    /* nothing readable yet, but the history shows a slow moving signal (1 Hz after 0 Hz / after a fast signal):
+                                                                * show it NOW in SLOW so the new wave rolls in from the right; the number follows when two periods exist */
+            if (++atb_slowish_n >= 2u) { dbg_atb_why = 10; dbg_atb_arg = 0.0f; atb_slowish_n = 0; AtbSwitch(OSC_NT - 2); }
+        } else atb_slowish_n = 0;
         return;
     }
 
@@ -800,15 +811,9 @@ static void OscAutoTimebase(void)       /* called every frame after measuring */
     if (osc_raw_vpp < 0.05f) { atb_t_bad = 0; return; }       /* flat window = no signal */
     if (SlowRecentFlat()) { atb_t_bad = 0; return; }          /* the signal just stopped (1 Hz -> 0 Hz): stay, let the old trace scroll out of the window by itself - no jump to FAST */
     if (!atb_t_bad) atb_t_bad = now;
-    if ((now - atb_t_probe) >= 250u) {
-        atb_t_probe = now;
-        ti = AtbProbeSlow(osc_tdiv_i, &pf);                   /* another SLOW base reads it? */
-        if (ti >= 0 && pf < ATB_SLOW_TO_FAST_HZ) { AtbSwitch(AtbPickSlow(pf)); return; }
-    }
     {   /* a window of 5 s at 500 ms/div needs ~2-3 s after a change (3 Hz -> 1 Hz) before two clean new periods exist: wait that long */
-        uint32_t lim = (uint32_t)(0.6f * osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS);
-        if (lim < ATB_BAD_MS) lim = ATB_BAD_MS;
-        if ((now - atb_t_bad) >= lim) { atb_t_bad = 0; AtbSwitch(AtbFastFallback(now)); }   /* SLOW cannot read it: FAST will */
+        uint32_t lim = 8000u;                                     /* the longest window (5 s) needs ~2.2 periods of the slowest signal we read (0.4 Hz) */
+        if ((now - atb_t_bad) >= lim) { atb_t_bad = 0; dbg_atb_why = 9; dbg_atb_arg = 0.0f; AtbSwitch(AtbFastFallback(now)); }   /* SLOW cannot read it: FAST will */
     }
 }
 
@@ -1550,7 +1555,7 @@ static void DrawTopPanel(void)
     /* โหมด trigger — AUTO:R / AUTO:F = จัดแนวให้นิ่ง, ROLL = ไถล */
     if (slow_active)
         snprintf(buf, sizeof(buf), "SLOW  ");
-    else if (osc_stable)
+    else if (osc_stable && osc_lock_auto)
         snprintf(buf, sizeof(buf), "AUTO:%s", osc_trig_fall ? "F" : "R");
     else
         snprintf(buf, sizeof(buf), "ROLL");
@@ -2119,7 +2124,7 @@ static void AdcCaptureFrame(void)
 
     /* --- หาจุด trigger ในข้อมูลดิบ (ระดับ = ค่ากลางของบัฟเฟอร์) แล้วเริ่มวาดที่จุดนั้น --- */
     uint32_t start = 0;
-    if (osc_stable) {
+    if (osc_stable && osc_lock_auto) {
         float sum = 0.0f, mid;
         uint32_t lim = (uint32_t)((float)ADC_PRE_POINTS * step) + w;   /* ค้นเฉพาะส่วนก่อน trigger */
         if (lim < 4u) lim = 4u;
@@ -2322,27 +2327,31 @@ static void SlowSync(void)
 
 /* history -> N_SAMPLES display points of period_us each, newest point last; returns the alias-guard spread and,
  * through *rough_out, the mean ms-to-ms jump of the newest 100 ms */
-static uint16_t SlowBuildPoints(uint16_t *out, uint32_t period_us, uint16_t *rough_out)
+static uint16_t SlowBuildPointsAt(uint16_t *out, uint32_t period_us, uint32_t t_view, uint32_t back_us, uint16_t *rough_out)
 {
-    uint32_t t_end = slow_last_t + 1u;                        /* exclusive; history is complete below this */
+    uint32_t t_end = slow_last_t + 1u;                        /* exclusive; history is complete below this: spread / roughness always use the NEWEST data */
     uint32_t rs = 0, rn = 0, rj = 0;
     if (period_us < 1000u) {                                  /* 10 / 20 ms/div: a point is shorter than one history tick -> linear interpolation */
         for (uint32_t j = 0; j < N_SAMPLES; j++) {
-            uint32_t off_us = (N_SAMPLES - 1u - j) * period_us;
+            uint32_t off_us = (N_SAMPLES - 1u - j) * period_us + back_us;      /* newest displayed point = tick (t_view-1) minus back_us */
+            t_end = t_view;
             uint32_t off_ms = off_us / 1000u, rem = off_us % 1000u;
             uint32_t t_low = (t_end - 1u) - off_ms - (rem ? 1u : 0u);
             uint32_t a = slow_hist[t_low & (SLOW_HIST_N - 1u)];
             uint32_t b = rem ? slow_hist[(t_low + 1u) & (SLOW_HIST_N - 1u)] : a;
             out[j] = (uint16_t)((a * rem + b * (1000u - rem)) / 1000u);
         }
+        t_end = slow_last_t + 1u;
     } else
     for (uint32_t j = 0; j < N_SAMPLES; j++) {
         uint32_t off_a = ((N_SAMPLES - j) * period_us + 999u) / 1000u;
+        t_end = t_view;
         uint32_t off_b = ((N_SAMPLES - 1u - j) * period_us + 999u) / 1000u;
         uint32_t sum = 0, cnt = 0;
         for (uint32_t tk = t_end - off_a; tk != t_end - off_b; tk++) { sum += slow_hist[tk & (SLOW_HIST_N - 1u)]; cnt++; }
         out[j] = (uint16_t)(cnt ? (sum / cnt) : slow_hist[(t_end - 1u) & (SLOW_HIST_N - 1u)]);
     }
+    t_end = slow_last_t + 1u;
     for (uint32_t k = 1u; k <= SLOW_ROUGH_TICKS; k++) {
         uint16_t a = slow_hist[(t_end - k) & (SLOW_HIST_N - 1u)], b = slow_hist[(t_end - k - 1u) & (SLOW_HIST_N - 1u)];
         rs += slow_hist_rg[(t_end - k) & (SLOW_HIST_N - 1u)]; rn++;
@@ -2352,13 +2361,67 @@ static uint16_t SlowBuildPoints(uint16_t *out, uint32_t period_us, uint16_t *rou
     return (uint16_t)(rs / rn);
 }
 
+static uint16_t SlowBuildPoints(uint16_t *out, uint32_t period_us, uint16_t *rough_out)
+{
+    return SlowBuildPointsAt(out, period_us, slow_last_t + 1u, 0u, rough_out);
+}
+
+/* TRIGGERED VIEW for 10..50 ms/div (windows of 0.1-0.5 s): lock the picture to the most recent rising (or falling) edge of the history,
+ * with the edge 10 % from the left, like a scope. The picture then stands still instead of scrolling, and a change of frequency
+ * or amplitude shows up within one period. Longer windows (>= 100 ms/div) keep scrolling (roll mode).
+ * Returns 1 and the view end (tick, sub-tick offset) when a clean edge exists, 0 = free-run (no signal / no edge). */
+static volatile uint8_t dbg_slow_trig = 0;
+static float slow_pv_cur = 0.0f; static uint32_t slow_pv_t = 0u;   /* drawn time base (us per point) and the tick of its last update */
+static uint8_t SlowFindTrigger(uint32_t period_us, uint32_t *t_view, uint32_t *back_us)
+{
+    uint32_t w_ms = (uint32_t)(((uint64_t)period_us * N_SAMPLES) / 1000u);          /* window length in ms */
+    uint32_t last = slow_last_t;
+    uint32_t pre  = w_ms / 10u;                                                      /* edge sits 10 % from the left */
+    uint32_t reach = w_ms + w_ms / 2u;                                               /* look back 1.5 windows */
+    if (!(osc_stable && osc_lock_auto) || w_ms > 500u || slow_valid_cnt < reach + 8u) return 0;
+    uint32_t newest_ok = last - (w_ms - pre) - 1u;                                   /* view must end before the newest tick */
+    uint32_t s0 = last - reach;
+    uint16_t mn = 0xFFFF, mx = 0;
+    for (uint32_t t = s0; t <= last; t++) {
+        uint16_t v = slow_hist[t & (SLOW_HIST_N - 1u)];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+    if ((uint32_t)(mx - mn) < 100u) return 0;                                        /* no signal worth locking to */
+    float mid = 0.5f * (float)(mx + mn), hy = 0.2f * (float)(mx - mn);
+    int found = 0; float tc = 0.0f;
+    uint8_t armed = 0;
+    uint16_t pv = slow_hist[s0 & (SLOW_HIST_N - 1u)];
+    armed = osc_trig_fall ? ((float)pv > mid) : ((float)pv < mid);
+    for (uint32_t t = s0 + 1u; t <= newest_ok; t++) {
+        float v = (float)slow_hist[t & (SLOW_HIST_N - 1u)], p = (float)slow_hist[(t - 1u) & (SLOW_HIST_N - 1u)];
+        if (osc_trig_fall) {
+            if (v > mid + hy) armed = 1;
+            else if (armed && p >= mid && v < mid) { tc = (float)(t - 1u) + (p - mid) / (p - v); found = 1; armed = 0; }
+        } else {
+            if (v < mid - hy) armed = 1;
+            else if (armed && p < mid && v >= mid) { tc = (float)(t - 1u) + (mid - p) / (v - p); found = 1; armed = 0; }
+        }
+    }
+    if (!found) return 0;
+    {   /* newest displayed point = edge + 0.9 window - one point; express it as tick (ceil) minus a sub-tick offset */
+        float t_new = tc + (float)(w_ms - pre) - (float)period_us / 1000.0f;
+        uint32_t tick = (uint32_t)ceilf(t_new);
+        if (tick > last) return 0;
+        *t_view = tick + 1u;                                                         /* exclusive end */
+        *back_us = (uint32_t)(((float)tick - t_new) * 1000.0f);
+        if (*back_us > 999u) *back_us = 999u;
+    }
+    return 1;
+}
+
 /* 1 = the newest 100 ms of history cannot belong to a slow signal of frequency f (0 = not readable) and amplitude vpp_counts:
  * a slow sine/triangle moves 0.002*f*Vpp counts per ms on average (square less); allow twice that plus noise. */
 static uint8_t SlowLooksFast(float f, float vpp_counts, uint16_t spread, uint16_t rough)
 {
     if (spread > SLOW_SPREAD_MAX) return 1;
     if (f > 0.0f) return (rough > (uint32_t)(0.004f * f * vpp_counts) + 60u) ? 1u : 0u;
-    {   uint32_t thr = (uint32_t)(0.16f * vpp_counts);       /* a slow signal (< 55 Hz) moves at most ~0.11 x Vpp per ms; 0.16 x = about 80 Hz */
+    {   uint32_t thr = (uint32_t)(0.26f * vpp_counts);       /* a slow signal (< 55 Hz) moves at most ~0.11 x Vpp per ms; 0.16 x = about 80 Hz */
         if (thr < SLOW_ROUGH_FAST) thr = SLOW_ROUGH_FAST;
         return (rough > thr) ? 1u : 0u;
     }
@@ -2445,6 +2508,26 @@ static uint8_t SlowRecentFlat(void)
     return ((float)(mx - mn) * ADC_VREF / ADC_FULL < 0.20f) ? 1u : 0u;
 }
 
+/* 1 = the newest 1.5 s of history holds a clearly moving signal (>= 0.3 V) whose speed is clearly slow (< ~40 Hz): estimated from the mean ms-to-ms step,
+ * a sine moves 0.002 * f * Vpp counts per ms. Needs no readable frequency, so it works within ~0.3 s of a signal appearing. */
+static uint8_t SlowSlowish(void)
+{
+    uint32_t t_end = slow_last_t + 1u, rs = 0;
+    uint16_t mn = 0xFFFF, mx = 0;
+    if (slow_valid_cnt < 1500u) return 0;
+    for (uint32_t k = 1u; k <= 1500u; k++) {
+        uint16_t v = slow_hist[(t_end - k) & (SLOW_HIST_N - 1u)];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+    if ((float)(mx - mn) * ADC_VREF / ADC_FULL < 0.30f) return 0;
+    for (uint32_t k = 1u; k <= SLOW_ROUGH_TICKS; k++) {
+        uint16_t a = slow_hist[(t_end - k) & (SLOW_HIST_N - 1u)], b = slow_hist[(t_end - k - 1u) & (SLOW_HIST_N - 1u)];
+        rs += (a > b) ? (uint32_t)(a - b) : (uint32_t)(b - a);
+    }
+    return ((float)(rs / SLOW_ROUGH_TICKS) < 0.08f * (float)(mx - mn) + 12.0f) ? 1u : 0u;
+}
+
 /* What would SLOW time base ti show? (0 = nothing clean). Reads the history only: the display is not touched. */
 static float SlowProbeFreq(int ti)
 {
@@ -2471,15 +2554,47 @@ static void SlowCaptureFrame(void)
     strcpy(osc_det, "INVALID");
 
     if (slow_valid_cnt == 0) { dbg_adc_ok = 0; osc_dirty = 1; return; }
-    spread = SlowBuildPoints(pts, slow_period_us, &rough);
+    {   uint32_t tv = 0, bk = 0;
+        if (SlowFindTrigger(slow_period_us, &tv, &bk)) { spread = SlowBuildPointsAt(pts, slow_period_us, tv, bk, &rough); dbg_slow_trig = 1; }
+        else                                           { spread = SlowBuildPoints(pts, slow_period_us, &rough);              dbg_slow_trig = 0; }
+    }
     for (uint32_t i = 0; i < N_SAMPLES; i++) {
-        raw_samples[i] = (int16_t)pts[i];
         if (pts[i] < vmin) vmin = pts[i];
         if (pts[i] > vmax) vmax = pts[i];
+    }
+    {   /* DISPLAY ONLY (the measurement below does not depend on it): when the selected time base changes, the drawn one moves toward it
+         * by 15 % per frame instead of jumping (a 10x change takes ~1.4 s) */
+        uint16_t dpts[N_SAMPLES], r2;
+        const uint16_t *src = pts;
+        uint32_t nowt = HAL_GetTick();
+        float tgt = (float)slow_period_us;
+        if (slow_pv_cur < 1.0f || (nowt - slow_pv_t) > 1500u) slow_pv_cur = tgt;
+        slow_pv_t = nowt;
+        if (slow_pv_cur < tgt)      { slow_pv_cur *= 1.15f; if (slow_pv_cur > tgt) slow_pv_cur = tgt; }
+        else if (slow_pv_cur > tgt) { slow_pv_cur /= 1.15f; if (slow_pv_cur < tgt) slow_pv_cur = tgt; }
+        if (!dbg_slow_trig && slow_pv_cur != tgt) { (void)SlowBuildPoints(dpts, (uint32_t)slow_pv_cur, &r2); src = dpts; }
+        for (uint32_t i = 0; i < N_SAMPLES; i++) raw_samples[i] = (int16_t)src[i];
     }
     osc_fs_eff   = 1000000.0f / (float)slow_period_us;
     osc_raw_valid = 0;
     osc_raw_freq = SlowFreqFromPts(pts, osc_fs_eff, &osc_raw_vpp, 1);
+    if (osc_raw_freq <= 0.0f) {   /* the picture's window shows < 2 clean periods (1 Hz in a 200 ms/div window): measure on ANY SLOW window that does.
+                                   * Picture and numbers are independent, so the picture can keep its time base while the frequency changes. */
+        for (uint32_t k = 0; k < 6u; k++) {
+            int ti = (int)(OSC_NT - 1u - k);
+            uint16_t mp[N_SAMPLES], mr = 0, msp;
+            float mv = 0.0f, mf;
+            uint32_t mus;
+            if (ti == osc_tdiv_i) continue;
+            mus = (uint32_t)(osc_tdivs_ms[ti] * (float)OSC_H_DIVS * 1000.0f / (float)N_SAMPLES);
+            msp = SlowBuildPoints(mp, mus, &mr);
+            mf  = SlowFreqFromPts(mp, 1.0e6f / (float)mus, &mv, 1);
+            if (mf <= 0.0f || mf > 130.0f) continue;                  /* SLOW never reports a frequency above ~130 Hz (FAST's job) */
+            if (SlowLooksFast(mf, mv * (float)ADC_FULL / ADC_VREF, msp, mr)) { osc_raw_valid = 0; continue; }
+            osc_raw_freq = mf; osc_raw_vpp = mv; spread = msp; rough = mr;
+            break;
+        }
+    }
     dbg_slow_spread = spread;
     dbg_slow_rough  = rough;
     slow_fast_flag  = 0;
@@ -2502,6 +2617,7 @@ static void SlowCaptureFrame(void)
 #else  /* !ADC_INPUT_ENABLE */
 void OscSlowTick(void) { }
 static float SlowProbeFreq(int ti) { (void)ti; return 0.0f; }
+static uint8_t SlowSlowish(void) { return 0u; }
 #endif /* ADC_INPUT_ENABLE */
 
 /* USER CODE END 0 */

@@ -24,9 +24,13 @@ static uint8_t osc_auto_tb = 1; static float osc_raw_vpp; static volatile uint8_
 typedef struct {float freq;} M; static volatile M osc_meas;
 static uint32_t now_ms; static uint32_t HAL_GetTick(void){return now_ms;}
 static double F=1000, A=2.5; static int fixed_zero=0, flat_fast=0;
+static double lastF=-1, t_change_ms=-1e9; static uint32_t now_ms_dummy;
 /* model of the history probe: a SLOW base reads F when >= 2.1 cycles fit, F <= Fs/8 and the signal is not fast */
 static float SlowProbeFreq(int ti){ double t=osc_tdivs_ms[ti], fs=24000.0/t, cyc=F*t*0.01; if (A<0.05 || fixed_zero || F>400.0) return 0.0f;
-  return (cyc>=3.1 && F<=fs/8 && F>=0.2) ? (float)F : 0.0f; }
+  return (cyc>=3.1 && F<=fs/8 && F>=0.2 && ((double)now_ms - t_change_ms) >= 2200.0/F) ? (float)F : 0.0f; }
+static int slowish_model(void){ return (A>=0.3 && !fixed_zero && F<40.0 && ((double)now_ms - t_change_ms)>=300.0) ? 1 : 0; }
+static uint8_t SlowSlowish(void){ return (uint8_t)slowish_model(); }
+static uint8_t osc_lock_auto=0;
 static int recent_flat=0; static uint8_t SlowRecentFlat(void){ return recent_flat; }
 #include "atb_extract.c"
 static void measure(void){                       /* model of what the firmware reads in the current mode */
@@ -34,12 +38,12 @@ static void measure(void){                       /* model of what the firmware r
   slow_active = osc_tdiv_i >= OSC_NT_FAST;
   if (A >= 0.05 && !fixed_zero){
     if (!slow_active) { if (F >= 39.9 && F <= 100100) f=(float)F; }
-    else { double cyc=F*t*0.01, fs=24000.0/t; if (cyc>=3.1 && F<=fs/8 && F>=0.2) f=(float)F; slow_fast_flag = (F > 400.0); }
+    else { for (int k=OSC_NT-1;k>=OSC_NT_FAST;k--){ double tk=osc_tdivs_ms[k], cyc=F*tk*0.01, fs=24000.0/tk; if (cyc>=3.1 && cyc<=40.0 && F<=fs/8 && F>=0.2 && ((double)now_ms - t_change_ms) >= 2200.0/F) f=(float)F; } slow_fast_flag = (F > 400.0); }   /* the firmware measures on ANY SLOW window */
   adc_fast_content = (F > 20000.0) ? 1 : 0;  /* burst spread trips for fast signals */
   }
   osc_meas.freq=f;
 }
-static void run(double secs){ for(double s=0;s<secs;s+=0.1){ now_ms+=100; measure(); OscAutoTimebase(); } }
+static void run(double secs){ for(double s=0;s<secs;s+=0.1){ now_ms+=100; if(F!=lastF){ lastF=F; t_change_ms=now_ms; } measure(); OscAutoTimebase(); } }
 static int failures;
 static void check(const char*n,int ok,const char*extra){ printf("%s %-36s tdiv_idx=%2d (%s) freq_read=%.2f %s\n",ok?"PASS":"FAIL",n,osc_tdiv_i,slow_active?"SLOW":"FAST",osc_meas.freq,extra); if(!ok)failures++; }
 static void reset(int ti){ osc_tdiv_i=ti; atb_t_switch=now_ms; atb_t_bad=0; atb_t_probe=0; osc_auto_tb=1; hold_active=0; osc_auto_stage=0; slow_active=ti>=OSC_NT_FAST; measure(); }
@@ -50,8 +54,8 @@ int main(void){
     F=fs_list[i]; A=2.5; reset(8); run(40); char nm[48]; snprintf(nm,sizeof nm,"%.1f Hz from FAST start",F);
     check(nm, osc_meas.freq>0.0f && fabs(osc_meas.freq-F)<1e-3, "");
   }
-  { double fl[]={30,38,44,20,11}; int want[]={13,12,12,13,14};   /* closest to 4 cycles, >= 3 cycles: 30 Hz -> 20 ms/div, 44 Hz -> 10 ms/div */
-    for(int q=0;q<5;q++){ F=fl[q]; A=2.5; reset(8); run(40); char nm[64]; snprintf(nm,sizeof nm,"%.0f Hz picks SLOW base %d",F,want[q]); check(nm, slow_active && osc_tdiv_i==want[q] && osc_meas.freq>0, ""); } }
+  { double fl[]={0.7,5,11,30,44,60}; int want[]={17,16,16,14,14,12};   /* one wide base per range: <0.9 Hz 500 ms, <12 Hz 200 ms, <45 Hz 50 ms, above 10 ms */
+    for(int q=0;q<6;q++){ F=fl[q]; A=2.5; reset(8); run(40); char nm[64]; snprintf(nm,sizeof nm,"%.0f Hz picks SLOW base %d",F,want[q]); check(nm, slow_active && osc_tdiv_i==want[q] && osc_meas.freq>0, ""); } }
   F=300000; A=2.1; reset(8); s0=dbg_atb_switches; run(120); check("300 kHz: ends FAST, <=3 switches", !slow_active && dbg_atb_switches-s0<=3, ""); A=2.5;
   F=300000; reset(17); run(30); check("300 kHz seen in SLOW: back to FAST", !slow_active, "");
   /* the friend's sequence: 1 Hz -> 2 MHz -> 1 Hz, each held 20 s (model: FAST cannot read 2 MHz or 1 Hz) */
@@ -66,6 +70,14 @@ int main(void){
   A=0.0; F=100; reset(8); s0=dbg_atb_switches; run(60); check("no signal: no switching", dbg_atb_switches==s0 && osc_tdiv_i==8, "");
   A=0.1; fixed_zero=1; reset(8); s0=dbg_atb_switches; run(120); printf("     noise-only: %d switches in 120 s\n", dbg_atb_switches-s0);
   check("noise-only: bounded, ends FAST", dbg_atb_switches-s0<=6 && !slow_active, "");
+  /* 11 Hz -> 1 Hz: the 50 ms window shows a flat line; within ~1.2 s the board must be on the 5 s window, reading within 5 s */
+  fixed_zero=0; F=11; A=2.5; reset(8); run(40); s0=dbg_atb_switches; check("11 Hz first (SLOW, reading)", slow_active && osc_meas.freq>0, "");
+  F=1; run(1.3); check("11 Hz -> 1 Hz: same 200 ms/div, no jump", slow_active && osc_tdiv_i==OSC_NT-2 && dbg_atb_switches==s0, "");
+  run(4.0); check("11 Hz -> 1 Hz: reading 1 Hz within 5.3 s, still no jump", slow_active && osc_meas.freq>0 && fabs(osc_meas.freq-1.0)<0.01 && dbg_atb_switches==s0, "");
+  /* 4 -> 5 -> 6 -> 7 Hz and 20 -> 10 Hz: not one switch */
+  F=4; reset(16); run(20); s0=dbg_atb_switches; F=5; run(10); F=6; run(10); F=7; run(10); check("4 -> 5 -> 6 -> 7 Hz: no time base change", dbg_atb_switches==s0 && osc_tdiv_i==OSC_NT-2 && osc_meas.freq>0, "");
+  F=20; reset(14); run(20); s0=dbg_atb_switches; F=15; run(10); F=10; run(10); check("20 -> 15 -> 10 Hz: no time base change", dbg_atb_switches==s0 && osc_tdiv_i==OSC_NT-4 && osc_meas.freq>0, "");
+  F=1; reset(16); run(20); s0=dbg_atb_switches; F=2; run(10); F=3; run(10); F=4; run(10); check("1 -> 2 -> 3 -> 4 Hz: no time base change", dbg_atb_switches==s0 && osc_meas.freq>0, "");
   /* 1 Hz stops (generator set to 0 Hz): the old trace is still in the window (raw Vpp large) but the newest 1.5 s are flat: stay SLOW, no jump to FAST */
   fixed_zero=0; F=1; A=2.5; reset(8); run(40); recent_flat=1; fixed_zero=1; s0=dbg_atb_switches; run(20);
   check("1 Hz stops: stays SLOW, no switch for 20 s", slow_active && dbg_atb_switches==s0, ""); recent_flat=0; fixed_zero=0;
@@ -80,6 +92,11 @@ int main(void){
   OscAutoRearm(); F=1000; run(15); check("PC13 long: AUTO again -> FAST at 1 kHz", osc_auto_tb==1 && !slow_active && osc_meas.freq>0, "");
   A=2.5; F=1; reset(8); osc_auto_tb=0; s0=dbg_atb_switches; run(60); check("manual: never switches", dbg_atb_switches==s0 && osc_tdiv_i==8, "");
   F=1; reset(8); hold_active=1; s0=dbg_atb_switches; run(60); check("HOLD: never switches", dbg_atb_switches==s0, "");
+  /* a signal appears after silence (0 Hz -> 1 Hz, or after a fast signal): SLOW takes over at once, no 2 s of analysis in FAST */
+  flat_fast=1; A=2.5; F=1000; reset(8); run(10); F=1; s0=dbg_atb_switches; run(0.9); check("1 kHz -> 1 Hz: SLOW within 0.9 s (rolls in)", slow_active && osc_tdiv_i==OSC_NT-2, ""); flat_fast=0;
+  A=2.5; F=2000000; reset(8); run(10); A=0.0; run(5); A=2.5; F=1; flat_fast=1; run(0.9); check("2 MHz -> 0 -> 1 Hz: SLOW within 0.9 s", slow_active, ""); flat_fast=0;
+  /* the lock (still picture) follows the frequency with hysteresis 35 / 45 Hz */
+  F=50; A=2.5; reset(8); run(10); check("50 Hz: picture locked", osc_lock_auto==1, ""); F=40; run(10); check("40 Hz: still locked (hysteresis)", osc_lock_auto==1, ""); F=30; run(10); check("30 Hz: rolling", osc_lock_auto==0, ""); F=40; run(10); check("40 Hz from below: still rolling", osc_lock_auto==0, ""); F=60; run(10); check("60 Hz: locked again", osc_lock_auto==1, "");
   printf("autotb failures=%d\n",failures); return failures; }
 '''
 (OUT/'atb_test.c').write_text(harness)

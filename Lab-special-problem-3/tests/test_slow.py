@@ -29,7 +29,9 @@ static const float osc_tdivs_ms[] = {0.005f,0.01f,0.015f,0.02f,0.05f,0.1f,0.2f,0
 #define T100 15
 #define T200 16
 #define T500 17
-static int osc_tdiv_i = 8;
+#define OSC_NT 18
+static uint32_t HAL_GetTick(void);
+static int osc_tdiv_i = 8; static int osc_trig_fall = 0; static uint8_t osc_stable = 1; static uint8_t osc_lock_auto = 1;
 static volatile int16_t raw_samples[N_SAMPLES];
 static float osc_fs_eff, osc_raw_freq, osc_raw_vpp, osc_capture_tdiv;
 static float osc_raw_mean_ct, osc_raw_rms_ct, osc_raw_min_ct, osc_raw_max_ct; static uint8_t osc_raw_valid;
@@ -40,6 +42,7 @@ static unsigned rs=12345; static double rnd(void){rs=rs*1103515245u+12345u; retu
 static int burst_k; static double burst_t;   /* conversions 1.25 us apart + the firmware's dither delay ((k*3)%7 loops of ~62 ns) */
 static inline uint16_t SlowAdcRead(void){ burst_t += 1.25e-6 + 62e-9*((burst_k*3)%7); burst_k++; double tt=now_s+burst_t;
   double v=DC+AMP*sin(2*M_PI*F_HZ*tt)+AMP2*sin(2*M_PI*F2_HZ*tt)+NOISE*rnd(); if(v<0)v=0; if(v>3.3)v=3.3; return (uint16_t)(v/3.3*4095.0+0.5);}
+static uint32_t HAL_GetTick(void){ return (uint32_t)(now_s*1000.0+0.5); }
 #include "slow_extract.c"
 static int failures;
 static int busy_period=0, busy_len=0;       /* simulate burst captures: slow_busy=1 for busy_len ms every busy_period ms */
@@ -65,7 +68,7 @@ static double max_step_ratio(void){ double m=0; int lo=4095,hi=0; for(int i=0;i<
   for(int i=1;i<N_SAMPLES;i++){ double d=fabs((double)raw_samples[i]-raw_samples[i-1]); if(d>m)m=d; } return hi>lo ? m/(hi-lo) : 0; }
 int main(void){
   osc_tdiv_i=T200; run(0.01);
-  expect_zero("1 Hz @200 ms/div (2 cycles only)",T200,2.8);   /* 3 edges needed */
+  expect_f("1 Hz @200 ms/div (measured on 5 s)",1.0,T200,6.0,0.03);   /* the picture shows 2 cycles, the number comes from the 5 s window */
   expect_f("1 Hz @500 ms/div",1.0,T500,6.0,0.03);
   expect_f("0.6 Hz @500 ms/div (3 cycles)",0.6,T500,7.0,0.03);
   expect_f("11 Hz @50 ms/div",11.0,T50,1.5,0.03);
@@ -73,9 +76,9 @@ int main(void){
   expect_f("30 Hz @20 ms/div (6 cycles)",30.0,T20,1.5,0.03);
   expect_f("45 Hz @10 ms/div (4.5 cycles)",45.0,T10,1.5,0.03);
   expect_f("20 Hz @20 ms/div (4 cycles)",20.0,T20,1.5,0.03);
-  expect_zero("20 Hz @10 ms/div (2 cycles only)",T10,1.5);
+  expect_f("20 Hz @10 ms/div (measured on 20/50 ms)",20.0,T10,1.5,0.03);
   NOISE=0.02; expect_f("1 Hz + 20 mV noise",1.0,T500,6.0,0.03); NOISE=0;
-  F_HZ=1.0; expect_zero("1 Hz @100 ms/div (1 cycle)",T100,1.6);
+  expect_f("1 Hz @100 ms/div (1 cycle shown)",1.0,T100,6.0,0.03);
   AMP=0.3; DC=1.65; NOISE=0.0;
   expect_zero_flag("300.00114 kHz aliases to 1.14 Hz",300001.14,T500,8.0,1);
   expect_zero_flag("300 kHz exact (aliases to DC)",300000.0,T200,3.0,1);
@@ -100,7 +103,7 @@ int main(void){
   osc_tdiv_i=T500; SlowSync(); SlowCaptureFrame();                 /* switch NOW */
   { int ok = osc_frame_valid && fabs(osc_raw_freq-1.0)<0.03; printf("%s instant FAST->SLOW 500 ms/div: %.3f Hz (no wait)\n", ok?"PASS":"FAIL", osc_raw_freq); if(!ok)failures++; }
   osc_tdiv_i=T200; SlowSync(); SlowCaptureFrame();
-  { int ok = osc_frame_valid && osc_raw_freq==0.0f; printf("%s instant 500->200 ms/div: window has 2 cycles -> %.3f Hz (---, no wrong number)\n", ok?"PASS":"FAIL", osc_raw_freq); if(!ok)failures++; }
+  { int ok = osc_frame_valid && fabs(osc_raw_freq-1.0)<0.03; printf("%s instant 500->200 ms/div: window has 2 cycles, number from the 5 s window -> %.3f Hz\n", ok?"PASS":"FAIL", osc_raw_freq); if(!ok)failures++; }
   /* trace continuity: switching bases must not leave steps/holes (sine of 1 Hz, 20 ms points: step <= 20 % of Vpp) */
   { double r=max_step_ratio(); int ok = r<0.20; printf("%s trace smooth after switch: biggest step %.1f %% of Vpp\n", ok?"PASS":"FAIL", r*100); if(!ok)failures++; }
 
@@ -135,10 +138,36 @@ int main(void){
     int ok = wrong==0 && seen[2]>5 && seen[3]>5 && seen[1]>5; printf("%s 1->2->3->1 Hz steps: in-between readings=%d (readings at 1/2/3 Hz: %d/%d/%d)\n", ok?"PASS":"FAIL", wrong, seen[1], seen[2], seen[3]); if(!ok) failures++; }
   /* --- 3 Vpp slow sines the history cannot read right now (1-2 cycles in the window): NOT a fast signal (was flagged at 13+ Hz) --- */
   AMP=1.5;
-  expect_zero_flag("13 Hz 3 Vpp, 1.3 cycles in window",13.0,T10,1.5,0);
-  expect_zero_flag("15 Hz 3 Vpp, 1.5 cycles in window",15.0,T10,1.5,0);
+  expect_f("13 Hz 3 Vpp @10 ms/div reads 13",13.0,T10,1.5,0.04); if(slow_fast_flag){printf("FAIL 13 Hz flagged\n");failures++;}
+  expect_f("15 Hz 3 Vpp @10 ms/div reads 15",15.0,T10,1.5,0.04); if(slow_fast_flag){printf("FAIL 15 Hz flagged\n");failures++;}
   expect_zero_flag("150 Hz 3 Vpp is still FAST",150.0,T50,1.5,1);
   AMP=0.3;
+  /* --- TRIGGERED VIEW (10..50 ms/div): the rising edge must sit at the same screen position in every frame (a still picture) --- */
+  { struct { double f; int ti; const char *n; } cs[] = {{30.0,T20,"30 Hz @20 ms/div"},{45.0,T10,"45 Hz @10 ms/div"},{12.0,T50,"12 Hz @50 ms/div"},{25.0,T50,"25 Hz @50 ms/div"}};
+    for(int q=0;q<4;q++){ AMP=0.9; NOISE=0.04; F_HZ=cs[q].f; osc_tdiv_i=cs[q].ti; run(3.0);
+      double lo=1e9,hi=-1e9; int fr=0, ntrig=0;
+      for(int k=0;k<60;k++){ run(0.0113+0.0007*(k%5)); SlowSync(); SlowCaptureFrame(); if(!osc_frame_valid) continue; fr++; ntrig+=dbg_slow_trig;
+        int mn=4095,mx=0; for(int i=0;i<N_SAMPLES;i++){ if(raw_samples[i]<mn)mn=raw_samples[i]; if(raw_samples[i]>mx)mx=raw_samples[i]; }
+        double mid=2048.0; double pos=-1; for(int i=1;i<N_SAMPLES;i++) if(raw_samples[i-1]<mid && raw_samples[i]>=mid){ pos=i-1+(mid-raw_samples[i-1])/(double)(raw_samples[i]-raw_samples[i-1]); break; }
+        if(pos<0) continue; if(pos<lo)lo=pos; if(pos>hi)hi=pos; }
+      int ok=(fr>50 && ntrig==fr && (hi-lo)<1.5);
+      printf("%s triggered view %-18s edge position spread %.2f points over %d frames (limit 1.5), triggered %d/%d, measured %.3f Hz\n", ok?"PASS":"FAIL", cs[q].n, hi-lo, fr, ntrig, fr, osc_raw_freq); if(!ok) failures++; }
+    NOISE=0.0; AMP=0.3; }
+  /* 11 Hz -> 1 Hz on ONE time base (200 ms/div): the picture keeps scrolling, no empty screen, and the number follows within ~3 s */
+  { AMP=0.9; F_HZ=11.0; osc_stable=0; osc_tdiv_i=T200; run(6.0); F_HZ=1.0; int ok=1, got=0; double t_read=-1; int minspan=99999;
+    for(int k=0;k<60;k++){ run(0.1); if(!osc_frame_valid) ok=0;
+      int lo=4095,hi=0; for(int i=0;i<N_SAMPLES;i++){ if(raw_samples[i]<lo)lo=raw_samples[i]; if(raw_samples[i]>hi)hi=raw_samples[i]; } if(hi-lo<minspan) minspan=hi-lo;
+      if(!got && fabs(osc_raw_freq-1.0)<0.03){ got=1; t_read=(k+1)*0.1; } }
+    ok = ok && got && t_read<=3.6 && minspan>1200;
+    printf("%s 11 Hz -> 1 Hz @200 ms/div: reads 1.00 Hz after %.1f s, smallest on-screen span %d counts (must stay > 1200)\n", ok?"PASS":"FAIL", t_read, minspan); if(!ok) failures++; AMP=0.3; }
+  /* smooth zoom: after a change of time base the DRAWN time base moves by <= 16 % per frame and then reaches the selected one */
+  { AMP=0.9; F_HZ=5.0; osc_stable=0; osc_tdiv_i=T100; run(3.0); double prev=slow_pv_cur, worst=1.0; osc_tdiv_i=T500; int n=0;
+    for(int k=0;k<80;k++){ run(0.033); double r=slow_pv_cur/prev; if(r<1)r=1/r; if(r>worst)worst=r; prev=slow_pv_cur; if(fabs(slow_pv_cur-20833.0)<1.0){ n=k; break; } n=k; }
+    int ok=(worst<=1.16 && fabs(slow_pv_cur-20833.0)<1.0); printf("%s zoom 100 -> 500 ms/div: biggest step %.3f x per frame, arrived after %d frames\n", ok?"PASS":"FAIL", worst, n); if(!ok) failures++; osc_stable=1; AMP=0.3; }
+  /* lock switched off: free-run even at 20 ms/div */
+  { osc_stable=0; AMP=0.9; F_HZ=30.0; osc_tdiv_i=T20; run(3.0); SlowSync(); SlowCaptureFrame(); int ok=(dbg_slow_trig==0); printf("%s lock off: 30 Hz @20 ms/div free-runs\n", ok?"PASS":"FAIL"); if(!ok) failures++; osc_stable=1; AMP=0.3; }
+  /* --- roll mode (>= 100 ms/div) and no-signal stay free-running --- */
+  { AMP=0.3; F_HZ=1.0; osc_tdiv_i=T500; run(8.0); SlowSync(); SlowCaptureFrame(); int ok=(dbg_slow_trig==0); printf("%s 1 Hz @500 ms/div stays in roll mode (no trigger)\n", ok?"PASS":"FAIL"); if(!ok) failures++; }
   /* --- noise only must not give an invented number --- */
   AMP=0.0; NOISE=0.6; F_HZ=1.0; osc_tdiv_i=T200; run(4.0);
   { int ok = osc_raw_freq==0.0f; printf("%s noise only: %.3f Hz (must be 0)\n", ok?"PASS":"FAIL", osc_raw_freq); if(!ok)failures++; }
