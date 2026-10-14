@@ -654,13 +654,15 @@ static void OscAutoScaleStep(void)
  * ========================================================================== */
 #define ATB_FAST_TO_SLOW_HZ  45.0f
 #define ATB_SLOW_TO_FAST_HZ  55.0f
-#define ATB_BAD_MS           2000u
+#define ATB_BAD_MS           1200u
 #define ATB_BACKOFF_MS       120000u
 
 static uint32_t atb_t_switch  = 0;      /* tick ที่สลับครั้งล่าสุด */
 static uint32_t atb_t_bad     = 0;      /* tick ที่เริ่มเจอ "มีสัญญาณแต่อ่าน f ไม่ได้" (0 = ไม่เจอ) */
 static uint32_t atb_t_backoff = 0;      /* ห้ามเริ่มลองใหม่จนถึง tick นี้ */
 static uint8_t  atb_try       = 0;      /* ขั้นที่กำลังลองในลำดับ SLOW */
+static uint8_t  atb_last_slow = 0;      /* SLOW base (index) that last gave a reading: tried first next time (0 = none yet) */
+static uint8_t  atb_bo_fast   = 0;      /* 1 = the 120 s pause was set because SLOW saw a FAST signal (lifted as soon as the signal is no longer fast) */
 volatile uint8_t dbg_atb_switches = 0;  /* จำนวนครั้งที่สลับ (ดูผ่าน SWD) */
 
 static int AtbPickFast(float f)         /* FAST base ที่ได้ ~2.5 คาบ */
@@ -697,7 +699,8 @@ static void AtbSwitch(int ti)
 
 static void OscAutoTimebase(void)       /* เรียกทุกเฟรมหลังวัดค่า */
 {
-    static const uint8_t order[4] = { OSC_NT_FAST + 1, OSC_NT_FAST + 0, OSC_NT_FAST + 2, OSC_NT_FAST + 3 };   /* 100, 50, 200, 500 ms/div: 2-60 Hz (the range just below FAST) first */
+    static const uint8_t base_order[4] = { OSC_NT_FAST + 1, OSC_NT_FAST + 0, OSC_NT_FAST + 2, OSC_NT_FAST + 3 };   /* 100, 50, 200, 500 ms/div: 2-60 Hz (the range just below FAST) first */
+    uint8_t order[4];
     uint32_t now, settle;
     float f, cyc;
 
@@ -705,16 +708,23 @@ static void OscAutoTimebase(void)       /* เรียกทุกเฟรม�
 
     now    = HAL_GetTick();
     settle = (slow_active ? (uint32_t)(osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS) : 0u) + 1500u;
-    if ((now - atb_t_switch) < settle) return;              /* รอ ring เต็ม / ตัววัดวอร์มอัพ */
+    if (slow_active && atb_try == 1u && atb_last_slow) settle = 2500u;   /* first try = the base that worked last time: judge it after 2.5 s, not a full window */
+    {   /* remembered base first, then the usual order without repeating it */
+        uint8_t n = 0;
+        if (atb_last_slow) order[n++] = atb_last_slow;
+        for (uint8_t i = 0; i < 4u && n < 4u; i++) if (base_order[i] != atb_last_slow) order[n++] = base_order[i];
+    }
+    if (!(slow_active && slow_fast_flag && (now - atb_t_switch) >= 600u) && (now - atb_t_switch) < settle) return;   /* รอ ring เต็ม / ตัววัดวอร์มอัพ */
 
-    if (slow_active && slow_fast_flag) {                            /* SLOW เห็นสัญญาณเร็วเกินไป: กลับ FAST เลย */
-        atb_try = 0; atb_t_backoff = now + ATB_BACKOFF_MS; AtbSwitch(OSC_TDIV_DEF);
+    if (slow_active && slow_fast_flag && (now - atb_t_switch) >= 600u) {   /* SLOW เห็นสัญญาณเร็วเกินไป: กลับ FAST เลย (รอแค่ 0.6 s ไม่ต้องรอจอเต็ม) */
+        atb_try = 0; atb_t_backoff = now + ATB_BACKOFF_MS; atb_bo_fast = 1; AtbSwitch(OSC_TDIV_DEF);
         return;
     }
 
     f = osc_meas.freq;
     if (f > 0.0f) {                                         /* อ่านความถี่ได้ */
         atb_t_bad = 0; atb_try = 0;
+        if (slow_active) atb_last_slow = (uint8_t)osc_tdiv_i;
         cyc = f * osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS / 1000.0f;
         if (!slow_active) {
             if (f < ATB_FAST_TO_SLOW_HZ)      AtbSwitch(AtbPickSlow(f));
@@ -727,10 +737,11 @@ static void OscAutoTimebase(void)       /* เรียกทุกเฟรม�
         return;
     }
 
-    if (osc_raw_vpp < 0.05f) { atb_t_bad = 0; atb_try = 0; atb_t_backoff = 0; return; }   /* ไม่มีสัญญาณ: ไม่ทำอะไร + เปิดให้ลองใหม่ได้ทันทีเมื่อสัญญาณกลับมา */
+    if (osc_raw_vpp < 0.05f) { atb_t_bad = 0; atb_try = 0; atb_t_backoff = 0; atb_bo_fast = 0; return; }   /* ไม่มีสัญญาณ: ไม่ทำอะไร + เปิดให้ลองใหม่ได้ทันทีเมื่อสัญญาณกลับมา */
 
     /* มีสัญญาณ แต่อ่านความถี่ไม่ได้ */
     if (!slow_active && adc_fast_content) { atb_t_bad = 0; return; }      /* สัญญาณเร็ว (เกินช่วงอ่าน): อยู่ FAST ไม่ต้องไล่ลอง SLOW */
+    if (!slow_active && atb_bo_fast && (now - adc_over_t) > 1500u) { atb_t_backoff = 0; atb_bo_fast = 0; }   /* signal is slow now: search SLOW again after the normal 2 s */
     if (!atb_t_bad) { atb_t_bad = now; return; }
     if (!slow_active) {
         if (now < atb_t_backoff) return;
@@ -738,7 +749,7 @@ static void OscAutoTimebase(void)       /* เรียกทุกเฟรม�
         atb_try = 1; AtbSwitch(order[0]);                   /* เริ่มลอง SLOW 200 ms/div */
     } else {
         if (atb_try < 4u) AtbSwitch(order[atb_try++]);      /* ลอง base ถัดไป (ผ่านช่วง settle แล้ว) */
-        else { atb_try = 0; atb_t_backoff = now + ATB_BACKOFF_MS; AtbSwitch(OSC_TDIV_DEF); }  /* หมดลำดับ: กลับ FAST 1 ms/div */
+        else { atb_try = 0; atb_t_backoff = now + ATB_BACKOFF_MS; atb_bo_fast = 0; AtbSwitch(OSC_TDIV_DEF); }  /* หมดลำดับ: กลับ FAST 1 ms/div */
     }
 }
 /* AUTO_TB_END ============================================================== */
@@ -1939,7 +1950,7 @@ failed:
  *   สลับ ADC: SLOW = single conversion (ปิด CONT/DMA)  <->  FAST = continuous + DMA (ค่าเดิมของ AdcCaptureRaw)
  * ========================================================================== */
 #define SLOW_MIN_TDIV_MS  50.0f           /* T/DIV ตั้งแต่ค่านี้ขึ้นไป = SLOW mode */
-#define SLOW_SPREAD_MAX   150u            /* ADC counts (~120 mV): bursts on a real board show ~100 counts of noise even on a clean slow signal */
+#define SLOW_SPREAD_MAX   200u            /* ADC counts (~120 mV): bursts on a real board show ~100 counts of noise even on a clean slow signal */
 
 static volatile uint16_t slow_ring[N_SAMPLES];
 static volatile uint32_t slow_head       = 0;   /* ตำแหน่งที่จะเขียนถัดไป (= จุดเก่าสุด) */
@@ -2095,7 +2106,7 @@ static void SlowCaptureFrame(void)
         uint32_t h = slow_head;
         for (uint32_t i = 0; i < N_SAMPLES; i++) {
             uint16_t v = slow_ring[(h + i) % N_SAMPLES];
-            rsum += slow_rough[(h + i) % N_SAMPLES];
+            if (i >= N_SAMPLES - 8u) rsum += slow_rough[(h + i) % N_SAMPLES];     /* newest 8 points only: a jump to a fast signal shows up within ~8 points */
             raw_samples[i] = (int16_t)v;
             if (v < vmin) vmin = v;
             if (v > vmax) vmax = v;
@@ -2107,11 +2118,11 @@ static void SlowCaptureFrame(void)
     osc_raw_freq     = SlowRawFrequency(osc_fs_eff);
     {   /* ALIAS GUARD: within one ~20 us burst a <=60 Hz signal barely moves (noise only, spread ~10 counts);
          * a fast signal swings by a large part of its amplitude (spread 30+ counts = ~25 mV). */
-        uint16_t spread = (uint16_t)(rsum / N_SAMPLES);
+        uint16_t spread = (uint16_t)(rsum / 8u);
         dbg_slow_spread = spread;
         slow_fast_flag  = 0;
         /* fast content = the 16-conversion burst spans a large part of the whole signal swing (a slow signal never does) */
-        if (spread > SLOW_SPREAD_MAX && (uint32_t)spread * 2u > (uint32_t)(vmax - vmin)) {
+        if (spread > SLOW_SPREAD_MAX) {
             slow_fast_flag = 1;                                        /* too fast for SLOW */
             osc_raw_freq   = 0.0f;                                     /* never show an aliased number */
         }

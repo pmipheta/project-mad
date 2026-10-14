@@ -20,7 +20,7 @@ harness = r'''
 #define OSC_FIT_CYCLES 2.5f
 static const float osc_tdivs_ms[] = {0.005f,0.01f,0.015f,0.02f,0.05f,0.1f,0.2f,0.5f,1.0f,2.0f,5.0f,6.0f,50.0f,100.0f,200.0f,500.0f};
 static int osc_tdiv_i = 8; static uint8_t osc_dirty, hold_active, osc_auto_stage, osc_frame_valid = 1; static volatile uint8_t slow_active;
-static uint8_t osc_auto_tb = 1; static float osc_raw_vpp; static volatile uint8_t slow_fast_flag; static uint8_t adc_fast_content;
+static uint8_t osc_auto_tb = 1; static float osc_raw_vpp; static volatile uint8_t slow_fast_flag; static uint8_t adc_fast_content; static uint32_t adc_over_t;
 typedef struct {float freq;} M; static volatile M osc_meas;
 static uint32_t now_ms; static uint32_t HAL_GetTick(void){return now_ms;}
 #include "atb_extract.c"
@@ -48,6 +48,12 @@ int main(void){
   }
   F=300000; A=2.1; reset(8); s0=dbg_atb_switches; run(120); check("300 kHz: ends FAST, <=3 switches", !slow_active && dbg_atb_switches-s0<=3, ""); A=2.5;
   F=300000; reset(15); run(30); check("300 kHz seen in SLOW: back to FAST", !slow_active, "");
+  /* the friend's sequence: 1 Hz -> 2 MHz -> 1 Hz, each held 20 s (model: FAST cannot read 2 MHz or 1 Hz) */
+  F=1; A=2.5; reset(8); run(40); check("1 Hz first", slow_active && osc_meas.freq>0, "");
+  F=2000000; run(20); check("2 MHz: back in FAST within 20 s", !slow_active, "");
+  F=1; run(30); check("2 MHz -> 1 Hz: SLOW and reading within 30 s", slow_active && osc_meas.freq>0, "");
+  F=1; reset(8); run(40); F=2000000; run(15); F=1; run(12); check("2 MHz -> 1 Hz: SLOW reading within 12 s (remembers 500 ms/div)", slow_active && osc_meas.freq>0, "");
+  F=20000; run(10); F=1; run(30); check("20 kHz -> 1 Hz: SLOW and reading within 30 s", slow_active && osc_meas.freq>0, "");
   F=1; reset(8); run(40); F=1000; run(60); check("1 Hz -> 1 kHz (back to FAST)", !slow_active && osc_meas.freq>0, "");
   F=1000; reset(8); run(10); F=1; run(60); check("1 kHz -> 1 Hz (to SLOW)", slow_active && osc_meas.freq>0, "");
   F=20; reset(14); run(60); check("20 Hz started on 200 ms/div", osc_meas.freq>0, "");
