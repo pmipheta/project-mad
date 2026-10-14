@@ -1,12 +1,19 @@
 """Portable ARM verification; leaves CubeIDE Debug artifacts untouched."""
 from pathlib import Path
-import subprocess, concurrent.futures
+import subprocess, concurrent.futures, os, shutil, sys
 root=Path(__file__).resolve().parents[1]
-out=Path.home()/'.hermes/cache/scratch/osc_arm_build';out.mkdir(parents=True,exist_ok=True)
-tools=Path('/Applications/STM32CubeIDE.app/Contents/Eclipse/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.macosaarch64_1.0.0.202602081740/tools/bin')
-gcc=str(tools/'arm-none-eabi-gcc')
+simulator = '--simulator' in sys.argv
+out=Path.home()/('.hermes/cache/scratch/osc_arm_sim_build' if simulator else '.hermes/cache/scratch/osc_arm_build');out.mkdir(parents=True,exist_ok=True)
+# Explicit override, PATH, then locally installed CubeIDE versions.
+gcc = os.environ.get('ARM_GCC') or shutil.which('arm-none-eabi-gcc')
+if not gcc:
+    candidates = sorted(Path('/Applications/STM32CubeIDE.app/Contents/Eclipse/plugins').glob('com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.*/tools/bin/arm-none-eabi-gcc'))
+    if not candidates: raise SystemExit('Set ARM_GCC to arm-none-eabi-gcc or add its directory to PATH')
+    gcc = str(candidates[-1])
+tools=Path(gcc).resolve().parent
 flags=['-mcpu=cortex-m7','-mthumb','-mfpu=fpv5-d16','-mfloat-abi=hard','-std=gnu11','-DDEBUG','-DUSE_HAL_DRIVER','-DSTM32F767xx','-O0','-g3','-ffunction-sections','-fdata-sections','-Wall','-Wextra','--specs=nano.specs']
 incs=['Core/Inc','Core/Inc/ILI9341','Core/Src/ILI9341','Drivers/STM32F7xx_HAL_Driver/Inc','Drivers/STM32F7xx_HAL_Driver/Inc/Legacy','Drivers/CMSIS/Device/ST/STM32F7xx/Include','Drivers/CMSIS/Include']
+if simulator: flags += ['-DADC_INPUT_ENABLE=0']
 flags += ['-I'+str(root/i) for i in incs]
 sources=sorted((root/'Core/Src').rglob('*.c'))+sorted((root/'Drivers/STM32F7xx_HAL_Driver/Src').glob('*.c'))+sorted((root/'Core/Startup').glob('*.s'))
 def compile(src):

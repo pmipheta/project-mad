@@ -4,7 +4,7 @@ import re, subprocess, os
 ROOT = Path(__file__).resolve().parents[1]
 OUT = (Path.home()/'.hermes/cache/scratch') / 'osc_regression'
 OUT.mkdir(parents=True, exist_ok=True)
-s = re.sub(r'/\*.*?\*/', '', (ROOT/'Core/Src/main.c').read_text(), flags=re.S)
+s = re.sub(r'/\*.*?\*/', '', '\n'.join(p.read_text() for p in sorted((ROOT/'Core/Src').glob('osc_*.c'))) + (ROOT/'Core/Inc/osc_config.h').read_text(), flags=re.S)
 def function(name):
     m = re.search(r'^(?:static\s+)?(?:inline\s+)?(?:void|int|float|uint8_t|uint32_t)\s+'+name+r'\([^;]*?\)\s*\{', s, re.M)
     assert m, name

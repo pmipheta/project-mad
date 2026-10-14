@@ -2,7 +2,7 @@
 from pathlib import Path
 import re, subprocess, os
 root=Path(__file__).resolve().parents[1]
-s=(root/'Core/Src/main.c').read_text()
+s=(root/'Core/Src/osc_acquisition.c').read_text()
 out=(Path.home()/'.hermes/cache/scratch')/'osc_regression';out.mkdir(exist_ok=True)
 def fn(name):
  m=re.search(r'^(?:static\s+)?(?:inline\s+)?(?:void|uint8_t|uint32_t)\s+'+name+r'\([^;]*?\)\s*\{',s,re.M);assert m,name
