@@ -63,6 +63,8 @@ static uint32_t prof_us[8];
 #define PROF_START() 0u
 #define PROF_END(i,t0) do{(void)(t0);}while(0)
 static volatile uint8_t adc_pend;static int adc_pd_tdiv,adc_pd_lvl;static uint32_t adc_pd_n,adc_pd_w,adc_pd_pre,adc_pd_t0,adc_pd_tick;static float adc_pd_step;static volatile uint32_t dbg_pipe_cnt;static unsigned abort_calls,start_calls;
+static uint8_t adc_f_held;static int osc_disp_cross;
+static float adc_last_good_vpp;static volatile uint32_t dbg_fm_fail[3];
 static float adc_hold_f;static float adc_last_good_f;static uint32_t adc_last_good_t,adc_legacy_t;static volatile uint32_t dbg_fm_cnt;static unsigned cap_calls;static uint32_t adc_hold_t,adc_over_t,adc_probe_t;static float adc_rough_ratio;static uint32_t tick_ms;static uint32_t HAL_GetTick(void){tick_ms+=40;return tick_ms;}static const uint8_t adc_meas_seq[3]={1,0,4};
 static float AdcRateHz(int l);static uint8_t AdcSetRateLevel(int l);
 #define OSC_V_FILL_DIVS 5.2f
@@ -213,7 +215,8 @@ main='''int main(void){int failures=0;
     fmc0=dbg_fm_cnt; cap_calls=0;
     for(int k=0;k<60;k++){ phase=0.05f+k*0.37f; AdcCaptureFrame(); if(!osc_frame_valid) continue; fr++; if(osc_raw_freq>0){ fsum+=osc_raw_freq; nf++; if(fabs(osc_raw_freq-cs[q].f)>0.02*cs[q].f) bad++; } else bad++; }
     calls=cap_calls; unsigned fm=dbg_fm_cnt-fmc0;
-    int ok=(fr>=55 && bad==0 && fm>=35 && calls < (unsigned)fr*3/2);
+    double vexp=2*620*3.3/4095.0, vdev=fabs(osc_raw_vpp-vexp)/vexp;
+    int ok=(fr>=55 && bad==0 && fm>=35 && calls < (unsigned)fr*3/2 && vdev<0.06);
     printf("%s measure from display capture %5.0f Hz (tdiv idx %d): fast frames %u of %d, captures per frame %.2f (was 2), wrong readings %d\\n", ok?"PASS":"FAIL", cs[q].f, cs[q].ti, fm, fr, (double)calls/fr, bad); if(!ok) failures++; }
   /* a frequency step must not show a wrong number: 200 -> 300 Hz, 5 frames later the reading is the new one */
   { int wrong=0; input_f=200; input_noise=30; osc_tdiv_i=8; adc_measure_n=3200; adc_meas_lvl=0; adc_hold_f=0; adc_last_good_t=0; adc_legacy_t=0;

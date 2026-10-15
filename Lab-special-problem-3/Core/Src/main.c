@@ -296,6 +296,8 @@ static volatile uint8_t slow_active = 0;  /* 1 = SLOW mode (T/DIV >= 50 ms) */
 static volatile uint8_t slow_fast_flag = 0; /* SLOW sees fast content inside each 1 ms tick -> signal too fast for SLOW (aliased) */
 static uint8_t  osc_auto_tb = 1;           /* 1 = firmware picks FAST/SLOW + T/DIV itself; 0 = manual (set by T/DIV keys, re-armed by 'z') */
 static float    osc_raw_freq = 0.0f, osc_raw_vpp = 0.0f;
+static uint8_t  adc_f_held = 0;         /* 1 = the frequency shown is the 1.5 s HOLD of an earlier reading, not measured in this frame */
+static int      osc_disp_cross = 0;     /* rising zero crossings in the displayed window (0..8) */
 static float    osc_raw_mean_ct = 0.0f, osc_raw_rms_ct = 0.0f, osc_raw_min_ct = 0.0f, osc_raw_max_ct = 0.0f;   /* statistics over whole cycles of the raw capture (ADC counts) */
 static uint8_t  osc_raw_valid = 0;     /* 1 = the values above belong to this frame (a clean periodic signal was found) */
 static float    osc_capture_tdiv = 1.0f;
@@ -305,9 +307,12 @@ static const uint8_t adc_meas_seq[3] = { 1u, 0u, 4u };   /* 800 kSa/s (original)
 static uint8_t  adc_too_fast = 0;      /* last measurement saw a signal above the usable range of its rate */
 static uint8_t  adc_fast_content = 0;  /* the 800 kSa/s-or-faster capture is full of sample-to-sample change: signal is fast, not slow */
 static uint8_t  adc_over_range = 0;    /* frequency above the readout limit (shown as >2.1MHz) */
+static float    adc_last_good_vpp = 0.0f; /* Vpp of the last old-style measurement */
 static float    adc_last_good_f = 0.0f;   /* last confirmed reading (old measurement or display capture) */
 static uint32_t adc_last_good_t = 0u, adc_legacy_t = 0u;   /* its tick; tick of the last old two-capture measurement */
+volatile uint32_t dbg_hold_cnt = 0;   /* frames whose waveform was not drawn (stale or unreadable FAST): SWD */
 volatile uint32_t dbg_fm_cnt = 0;
+volatile uint32_t dbg_fm_fail[3];     /* fast-path failures: unreadable / changed or amplitude moved / too fast (SWD) */
 volatile uint32_t dbg_pipe_cnt = 0;   /* frames whose capture was started during the previous draw (SWD) */
 static volatile uint8_t adc_pend = 0;  /* a display capture is running (started by AdcPrestart) */
 static int adc_pd_tdiv, adc_pd_lvl;    /* settings it was started with */
@@ -470,6 +475,7 @@ static void OscMeasureFrame(void)
             prev = v;
         }
     }
+    osc_disp_cross = ncross;
 
 #if ADC_INPUT_ENABLE
     {   /* Mx / Mn / Rs / Vp from the UNFILTERED data: the display smoothing filter and the averaging used to draw fast
@@ -699,6 +705,44 @@ static float SlowProbeFreq(int ti);          /* defined in the SLOW block */
 static uint8_t SlowSlowish(void);            /* defined in the SLOW block: 1 = the newest history is a clearly moving, clearly slow signal */
 
 static uint8_t SlowRecentFlat(void);   /* 1 = the newest 1.5 s of the slow history is flat (the signal has stopped) */
+/* HOLD_BEGIN =============================================================
+ * Do not draw a frame the board knows is wrong:
+ *  1. a frame captured under another time base than the one now selected (the auto time base switched while it was being processed): stale, skip it;
+ *  2. FAST has a real signal (>= 0.30 V) it cannot read (a slow wave looks like a straight line in its 60 ms window, e.g. 101 -> 1 Hz): keep the last good
+ *     picture for at most 0.5 s while the board switches;
+ *  3. the amplitude collapsed (< 0.30 V) within 2 s of a good picture (the generator blanks its output while a digit is edited): keep the picture up to 2 s;
+ *     fast signals (adc_fast_content), SLOW frames, a changed time base and a collapse that lasts longer than 2 s are drawn.
+ * Returns 1 = skip the waveform of this frame. Readable FAST frames record the time/base of the last good picture. */
+/* The frequency of a FAST frame is only trusted when it was measured in this frame, or when the picture agrees with it. A held reading (1.5 s memory that keeps F steady while a
+ * 100 Hz signal is read on every other frame) used to keep "F: 101 Hz" on the screen for up to 1.5 s after the signal changed to 1 Hz, while the window showed a sloping straight line:
+ * the board believed it could read the signal, so it neither switched nor held the picture. A held F that promises >= 3 cycles in the window but finds < 2 crossings is not trusted. */
+static uint8_t OscFreqTrusted(void)
+{
+    float cyc;
+    if (osc_meas.freq <= 0.0f) return 0;
+    if (!adc_f_held) return 1;
+    cyc = osc_meas.freq * osc_capture_tdiv * (float)OSC_H_DIVS / 1000.0f;
+    return (cyc >= 3.0f && osc_disp_cross < 2) ? 0 : 1;
+}
+#define HOLD_MAX_MS 500u
+#define HOLD_COLLAPSE_MS 2000u   /* the generator blanks its output while a digit is edited (board log: 1.8 s of 0.06-0.5 V wiggles between 101 Hz and 1 Hz) */
+static uint32_t osc_good_t    = 0;      /* tick of the last drawn readable FAST frame (0 = none) */
+static int      osc_good_tdiv = -1;     /* its time base */
+static uint8_t OscFrameHold(uint32_t now)
+{
+    if (osc_capture_tdiv != osc_tdivs_ms[osc_tdiv_i]) return 1;                              /* 1: captured under another base */
+    if (slow_active) { osc_good_t = 0; return 0; }
+    if (OscFreqTrusted()) { osc_good_t = now ? now : 1u; osc_good_tdiv = osc_tdiv_i; return 0; }
+    if (osc_good_t && osc_good_tdiv == osc_tdiv_i) {
+        uint32_t age = now - osc_good_t;
+        if (osc_raw_vpp >= 0.30f) { if (age < HOLD_MAX_MS && !adc_fast_content) return 1; }  /* 2: unreadable real signal: keep the picture */
+        else if (age < HOLD_COLLAPSE_MS) return 1;                                           /* 3: the signal collapsed to a flat sloping line after a good picture: keep it for up to 2 s */
+    }
+    return 0;
+}
+/* HOLD_END ================================================================ */
+
+
 /* AUTO_TB_BEGIN =============================================================
  * AUTO time base: เลือก FAST/SLOW และ T/DIV เองตามความถี่ที่วัดได้ (ปิดเมื่อผู้ใช้ปรับ T/DIV เอง; 'z' เปิดใหม่)
  *   FAST (burst DMA)  วัดความถี่ได้ >= ~40 Hz       SLOW (SysTick ring) วัดได้ ~0.2-60 Hz
@@ -716,6 +760,11 @@ static uint8_t SlowRecentFlat(void);   /* 1 = the newest 1.5 s of the slow histo
 static uint32_t atb_t_switch  = 0;      /* tick of the last switch */
 static uint32_t atb_t_bad     = 0;      /* tick when SLOW first had a signal it could not read (0 = no) */
 static uint32_t atb_t_probe   = 0;      /* tick of the last history probe */
+static float    atb_cand_f    = 0.0f;   /* SLOW repick candidate: a new base is picked only after 3 consistent readings (a single bogus reading used to park a 1 Hz signal on 10 ms/div for 4 s) */
+static uint8_t  atb_cand_n    = 0;
+static uint32_t atb_t_unread  = 0;      /* tick when FAST first saw a real signal it could not read (a slow wave looks like a straight line in its 60 ms window) */
+static uint32_t atb_t_hold    = 0;      /* tick of the last SLOW -> FAST switch caused by a fast signal: FAST needs ~1 s for its first reading and the history still holds the OLD slow signal */
+static uint32_t atb_t_flat    = 0;      /* tick when SLOW first saw a flat window (no signal) */
 static uint8_t  atb_slowish_n = 0;      /* consecutive probes that saw a slow moving signal while FAST could read nothing */
 static float    atb_last_f    = 0.0f;   /* last frequency that was read in either mode (used by the manual toggle) */
 static uint8_t  atb_last_fast = 0xFFu;  /* last FAST time base that gave a reading (0xFF = none yet) */
@@ -757,6 +806,9 @@ static void AtbSwitch(int ti)
     osc_tdiv_i   = ti;
     atb_t_switch = HAL_GetTick();
     atb_t_bad    = 0;
+    atb_t_flat   = 0;
+    atb_t_unread = 0;
+    atb_cand_n   = 0;
     osc_dirty    = 1;
     dbg_atb_switches++;
 }
@@ -789,27 +841,38 @@ static void OscAutoTimebase(void)       /* called every frame after measuring */
     if ((now - atb_t_switch) < 300u) return;                  /* let the new setting produce a frame first */
 
     /* SLOW saw a fast signal: back to FAST at once */
-    if (slow_active && slow_fast_flag) { atb_t_bad = 0; dbg_atb_why = 1; dbg_atb_arg = 0.0f; AtbSwitch(AtbFastFallback(now)); return; }
+    if (slow_active && slow_fast_flag) { atb_t_bad = 0; dbg_atb_why = 1; dbg_atb_arg = 0.0f; AtbSwitch(AtbFastFallback(now)); atb_t_hold = now; return; }
 
     f = osc_meas.freq;
+    if (!slow_active && !OscFreqTrusted()) f = 0.0f;           /* FAST: a held F whose picture shows no cycles counts as unreadable */
     if (f > 0.0f) {                                           /* readable */
-        atb_t_bad = 0;
+        atb_t_bad = 0; atb_t_flat = 0; atb_t_unread = 0;
         cyc = f * osc_tdivs_ms[osc_tdiv_i] * (float)OSC_H_DIVS / 1000.0f;
         if (!slow_active) {
             if (f < ATB_FAST_TO_SLOW_HZ)        { dbg_atb_why = 4; dbg_atb_arg = f; AtbSwitch(AtbPickSlow(f)); }
             else if (cyc < 3.0f || cyc > 14.0f) { dbg_atb_why = 5; dbg_atb_arg = f; AtbSwitch(AtbPickFast(f)); }
         } else {
-            if (f > ATB_SLOW_TO_FAST_HZ)        { dbg_atb_why = 2; dbg_atb_arg = f; AtbSwitch(AtbPickFast(f)); }
-            else if (cyc < 1.6f || f > (24000.0f / osc_tdivs_ms[osc_tdiv_i]) / 9.0f || (osc_tdiv_i == OSC_NT - 1 && f > 1.2f))
-                { dbg_atb_why = 3; dbg_atb_arg = f; AtbSwitch(AtbPickSlow(f)); }
+            if (f > ATB_SLOW_TO_FAST_HZ)        { dbg_atb_why = 2; dbg_atb_arg = f; AtbSwitch(AtbPickFast(f)); atb_t_hold = now; }
+            else if (cyc < 1.6f || f > (24000.0f / osc_tdivs_ms[osc_tdiv_i]) / 9.0f || (osc_tdiv_i == OSC_NT - 1 && f > 1.2f)) {
+                if (atb_cand_n && fabsf(f - atb_cand_f) <= 0.10f * atb_cand_f) atb_cand_n++; else { atb_cand_f = f; atb_cand_n = 1; }
+                if (atb_cand_n >= 3u) { atb_cand_n = 0; dbg_atb_why = 3; dbg_atb_arg = f; AtbSwitch(AtbPickSlow(f)); }
+            } else atb_cand_n = 0;
         }
         return;
     }
 
+    atb_cand_n = 0;
     /* not readable in the current mode */
     if (!slow_active) {
         /* FAST cannot see signals below ~40 Hz (they look flat in its 4-80 ms window). The history can: ask it, no waiting. */
-        if (adc_fast_content) return;                                                  /* clearly a fast signal right now */
+        if ((now - atb_t_hold) < 1500u) return;                                        /* just came here because of a fast signal: give FAST time to read it; the history is stale */
+        if (adc_fast_content) { atb_t_unread = 0; return; }                            /* clearly a fast signal right now */
+        if (osc_raw_vpp < 0.30f) { atb_t_unread = 0; }                                 /* silence or a 0.15-0.2 Vpp noise band: stay (the FAST guards use the same 0.30 V) */
+        else if (!atb_t_unread) atb_t_unread = now;
+        else if ((now - atb_t_unread) >= 700u) {                                       /* 0.7 s of a signal FAST cannot read (101 -> 1 Hz: a straight line): show the history view now,
+                                                                                        * the number follows when two periods exist. Readable frames reset the timer, so a 100 Hz signal that FAST reads on every other frame never gets here. */
+            atb_t_unread = 0; dbg_atb_why = 12; dbg_atb_arg = 0.0f; AtbSwitch(OSC_NT - 2); return;
+        }
         if ((now - atb_t_probe) < 250u) return;
         atb_t_probe = now;
         ti = AtbProbeSlow(-1, &pf);
@@ -822,7 +885,15 @@ static void OscAutoTimebase(void)       /* called every frame after measuring */
     }
 
     /* SLOW, current base shows nothing clean */
-    if (osc_raw_vpp < 0.05f) { atb_t_bad = 0; return; }       /* flat window = no signal */
+    if (osc_raw_vpp < 0.05f) {                                /* flat window = no signal */
+        atb_t_bad = 0;
+        /* PARK: after 2.4 s of silence (longer than the 2 s window of 200 ms/div, so the screen is already flat and nothing visibly changes) move to the 200 ms/div base.
+         * The next slow signal then rolls in from the right at a base that fits 1-12 Hz, instead of filling a 0.5 s window in half a second and zooming 3 s later. */
+        if (!atb_t_flat) atb_t_flat = now;
+        else if ((now - atb_t_flat) >= 2400u && osc_tdiv_i < (OSC_NT - 2)) { atb_t_flat = 0; dbg_atb_why = 11; dbg_atb_arg = 0.0f; AtbSwitch(OSC_NT - 2); }
+        return;
+    }
+    atb_t_flat = 0;
     if (SlowRecentFlat()) { atb_t_bad = 0; return; }          /* the signal just stopped (1 Hz -> 0 Hz): stay, let the old trace scroll out of the window by itself - no jump to FAST */
     if (!atb_t_bad) atb_t_bad = now;
     {   /* a window of 5 s at 500 ms/div needs ~2-3 s after a change (3 Hz -> 1 Hz) before two clean new periods exist: wait that long */
@@ -2169,6 +2240,7 @@ static void FAST_O2 AdcCaptureFrame(void)
     uint16_t vmin = 0xFFFF, vmax = 0;
     new_frame_ready = 0;
     osc_frame_valid = 0;
+    adc_f_held = 0;
     osc_raw_freq = osc_raw_vpp = 0.0f;
     osc_raw_valid = 0;
     osc_meas = (OscMeasure){0};
@@ -2244,9 +2316,9 @@ static void FAST_O2 AdcCaptureFrame(void)
     if (osc_raw_freq <= 0.0f) osc_raw_valid = 0;               /* statistics only for a confirmed reading */
     {   /* hold the last good reading for 1.5 s: a marginal signal (e.g. 2 MHz at 2.4 samples/cycle) fails on some frames */
         uint32_t tnow = HAL_GetTick();
-        if (osc_raw_freq > 0.0f)                                { adc_hold_f = osc_raw_freq; adc_hold_t = tnow; adc_last_good_f = osc_raw_freq; adc_last_good_t = tnow; }
+        if (osc_raw_freq > 0.0f)                                { adc_hold_f = osc_raw_freq; adc_hold_t = tnow; adc_last_good_f = osc_raw_freq; adc_last_good_t = tnow; adc_last_good_vpp = osc_raw_vpp; }
         else if (osc_raw_vpp < 0.05f || adc_over_range)         { adc_hold_f = 0.0f; }
-        else if (adc_hold_f > 0.0f && (tnow - adc_hold_t) < 1500u) { osc_raw_freq = adc_hold_f; }
+        else if (adc_hold_f > 0.0f && (tnow - adc_hold_t) < 1500u) { osc_raw_freq = adc_hold_f; adc_f_held = 1; }
     }
     adc_legacy_t = HAL_GetTick();
     PROF_END(5, pB0);
@@ -2290,12 +2362,23 @@ static void FAST_O2 AdcCaptureFrame(void)
         tnow = HAL_GetTick();
         dbg_fm_cnt++;
         PROF_END(7, pF0);
-        if (f2 > 0.0f && !adc_too_fast && fabsf(f2 - adc_last_good_f) <= 0.10f * adc_last_good_f) {
+        /* the raw min-max of ~30 000 samples at 800 kSa/s sits ~5 % above the true Vpp (noise peaks: 3.25 V against 3.08 V from the old measurement and 3.05 V in the picture).
+         * The reading of the old two-capture measurement is kept as the amplitude while the signal is steady; a clear change sends the frame back to that measurement. */
+        if (f2 > 0.0f && !adc_too_fast && fabsf(f2 - adc_last_good_f) <= 0.10f * adc_last_good_f
+            && osc_raw_vpp > 0.80f * adc_last_good_vpp && osc_raw_vpp < 1.25f * adc_last_good_vpp) {
+            if (osc_raw_valid && osc_raw_vpp > 0.0f) {   /* Mx / Mn / Rs use the cycle statistics: scale the swing about the mean to the steady amplitude */
+                float kk = adc_last_good_vpp / osc_raw_vpp;
+                osc_raw_max_ct = osc_raw_mean_ct + (osc_raw_max_ct - osc_raw_mean_ct) * kk;
+                osc_raw_min_ct = osc_raw_mean_ct + (osc_raw_min_ct - osc_raw_mean_ct) * kk;
+                osc_raw_rms_ct *= kk;
+            }
+            osc_raw_vpp = adc_last_good_vpp;
             osc_raw_freq = f2; adc_last_good_f = f2; adc_last_good_t = tnow; adc_hold_f = f2; adc_hold_t = tnow;
         } else {                                      /* changed or unreadable: the old two-capture measurement takes over on the next frame */
+            if (f2 <= 0.0f) { if (adc_too_fast) dbg_fm_fail[2]++; else dbg_fm_fail[0]++; } else dbg_fm_fail[1]++;
             osc_raw_freq = 0.0f; osc_raw_valid = 0; adc_last_good_t = 0u;
             if (osc_raw_vpp < 0.05f || adc_over_range)                 adc_hold_f = 0.0f;
-            else if (adc_hold_f > 0.0f && (tnow - adc_hold_t) < 1500u) osc_raw_freq = adc_hold_f;
+            else if (adc_hold_f > 0.0f && (tnow - adc_hold_t) < 1500u) { osc_raw_freq = adc_hold_f; adc_f_held = 1; }
         }
     }
 
@@ -3009,9 +3092,11 @@ int main(void)
                 }
                 dbg_trig_off = trig_offset;
                 uint32_t pd0 = DWT->CYCCNT;
+                uint8_t hold_frame = OscFrameHold(HAL_GetTick());
+                dbg_hold_cnt += hold_frame;
                 ClearCursors();         /* ล้างเส้น cursor เก่าก่อนวาดเฟรมใหม่ */
-                MapToScreen(trig_offset);
-                DrawWaveform();
+                if (!hold_frame) { MapToScreen(trig_offset);
+                DrawWaveform(); }
                 DrawCursors();          /* HOLD: วาดเส้น C1/C2 ทับหลังวาดรูป */
                 DrawSettingBar();       /* แถบ "กำลังตั้งค่าอะไร" ทับหลังวาดรูป */
                 prof_us[2] = AdcElapsedUs(pd0);
