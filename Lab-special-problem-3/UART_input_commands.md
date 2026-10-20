@@ -315,3 +315,11 @@ Generator ไล่ตามเวลาจริงต่อเนื่อง 
 **AUTO scale (`z` / ปุ่ม AUTO)**: V/DIV = ขั้นเล็กสุดที่ Vpp ไม่เกิน 4.0 div (จอเห็น ~5.3 div); T/DIV = เลือกด้วยกฎเดียวกับ auto time base (FAST ≥ 3.2 คาบ; SLOW ใช้ฐานเดียวกับที่ auto เลือก) เพื่อไม่ให้ auto time base ย้ายซ้ำ; Vpp < 0.05 V = ไม่มีสัญญาณ → 1 V/div + 1 ms/div; trigger อยู่ที่กลางสัญญาณอยู่แล้ว; AUTO ล้างโหมดบังคับ (`F`) กลับเป็นอัตโนมัติ.
 
 `?` แสดงบรรทัด `Mode:FAST*  MOVE:Y (frozen only)  offY:.. offX:..` เพิ่ม.
+
+## v56 — real-oscilloscope picture
+- Power-on: **1 ms/div FAST, 1 V/div**, continuous auto time base **OFF**. T/DIV and V/DIV stay where you set them; nothing re-zooms by itself.
+- `z` / AUTO button = **one-shot** autoscale: picks T/DIV (about 2–5 cycles on screen), V/DIV and FAST/SLOW once, then stays fixed. It no longer switches the continuous auto time base on.
+- `A` (or PC13 long press) = continuous automatic FAST/SLOW + T/DIV again (OFF at power-on). Changing T/DIV or pressing `F` turns it off.
+- `F` = toggle FAST/SLOW by hand (picks a sensible T/DIV for that mode). T/DIV ≥ 10 ms/div runs the SLOW engine, faster ones FAST.
+- Picture default is **trigger-locked** (`m a`); `m r` = roll, `m` toggles. Without a trigger edge (or below ~45 Hz in FAST) the free-running capture is shown.
+- A signal that does not fit the chosen T/DIV is shown as it really is (flat line / dense band); press `z`. Numbers (Vpp/Vmax/Vmin/RMS/F) are measured independently of the picture. FAST cannot read F below ~40 Hz, so F shows 0 until you press `z` / `F` (SLOW).

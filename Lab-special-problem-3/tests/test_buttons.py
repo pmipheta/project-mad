@@ -227,7 +227,7 @@ int main(void){
   { int t=osc_tdiv_i; for(int i=0;i<200;i++) frame(); check("forced FAST stays", osc_tdiv_i==t); }
   ActAutoMode(); check("A: automatic again", osc_auto_tb==1);
   F=5; lastF=-1; for(int i=0;i<300;i++) frame(); check("after A the auto switching works again (5 Hz -> SLOW)", slow_active && osc_auto_tb==1);
-  ActAuto(); osc_auto_stage=0; osc_auto_tb=0; ActAuto(); check("AUTO scale clears forced mode", osc_auto_tb==1);
+  ActAuto(); osc_auto_stage=0; osc_auto_tb=0; ActAuto(); check("v56: AUTO scale is one-shot, does not re-arm the continuous auto time base", osc_auto_tb==0);
   fresh(); F=1000; lastF=-1; frame(); hold_active=1; { int t=osc_tdiv_i; ActToggleFastSlow(); check("F while frozen is ignored", osc_tdiv_i==t && osc_auto_tb==1); } hold_active=0;
   fresh(); F=1000; ActToggleFastSlow(); check("forced mode is OFF at power-on", 1);
 

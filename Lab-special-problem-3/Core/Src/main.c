@@ -297,7 +297,7 @@ static uint8_t  osc_calib     = 1;         /* AC coupling (calibrate offset)   *
 static uint8_t  osc_dirty     = 1;         /* สั่งวาดใหม่แม้อยู่โหมด HOLD         */
 
 /* โหมดจอ (ดูโหมดที่ใช้อยู่ได้ที่บรรทัด Trig: ในหน้ารายงาน / บนจอ LCD) */
-static uint8_t  osc_stable    = 0;   /* 0 = ROLL (default, v36): never lock, the picture moves in every mode | 1 = AUTO: lock to the trigger edge from 45 Hz up (UART 'a') */
+static uint8_t  osc_stable    = 1;   /* v56: 1 = AUTO (default): lock to the trigger edge from 45 Hz up, free-running below / without an edge | 0 = ROLL: never lock (UART 'm r') */
 static uint8_t  osc_lock_auto = 0;   /* set by the auto time base: 1 while the signal is >= 45 Hz (hysteresis 35 / 45 Hz) */   /* 1 = นิ่ง (trigger) | 0 = ไถล (roll)  */
 static int      trig_hold     = 0;   /* trigger offset ล่าสุดที่ใช้          */
 static int      dbg_trig_off  = 0;   /* เก็บไว้ตรวจย้อนหลังผ่าน SWD          */
@@ -309,7 +309,7 @@ static float    osc_v[N_SAMPLES];          /* ข้อมูลหลัง cal
 static uint8_t  osc_frame_valid = 0;
 static volatile uint8_t slow_active = 0;  /* 1 = SLOW mode (T/DIV >= 50 ms) */
 static volatile uint8_t slow_fast_flag = 0; /* SLOW sees fast content inside each 1 ms tick -> signal too fast for SLOW (aliased) */
-static uint8_t  osc_auto_tb = 1;           /* 1 = firmware picks FAST/SLOW + T/DIV itself; 0 = manual (set by T/DIV keys, re-armed by 'z') */
+static uint8_t  osc_auto_tb = 0;           /* v56: 0 = T/DIV stays where the user put it (power-on, default); 1 = firmware picks FAST/SLOW + T/DIV continuously (only the 'A' key / PC13 long sets it). 'z' is one-shot and never sets it. */
 static float    osc_raw_freq = 0.0f, osc_raw_vpp = 0.0f;
 static uint8_t  adc_f_held = 0;         /* 1 = the frequency shown is the 1.5 s HOLD of an earlier reading, not measured in this frame */
 static int      osc_disp_cross = 0;     /* rising zero crossings in the displayed window (0..8) */
@@ -702,7 +702,7 @@ static void OscAutoScale(void)
 {
     if (hold_active) return; /* HOLD never replaces or retimes its capture. */
     osc_auto_stage = 1;
-    osc_auto_tb = 1;                 /* z / long SET = back to AUTO time base */
+    /* v56: one-shot. 'z' does not touch osc_auto_tb (continuous auto time base only via 'A') */
     osc_auto_tries = 0;
     osc_dirty = 1;
     UartPrint("\r\n AutoScale...\r\n");
@@ -945,7 +945,7 @@ static void OscAutoRearm(void)
 #define MV_Y_MAX_STEPS   40                  /* +-4 div */
 #define MV_X_STEP_PTS    (N_SAMPLES / 40)    /* 1/40 screen = 6 display points */
 #define AS_MIN_VPP       0.05f               /* below this Vpp there is no signal */
-#define AS_MIN_CYC       3.2f                /* FAST: fewest cycles on screen that the auto time base (switches below 3.0) leaves alone */
+#define AS_MIN_CYC       1.95f               /* v56: one-shot AUTO, real-scope style: the fastest FAST base that shows >= 2 cycles (2-5 on screen) */
 
 static float MvShownV(int idx)               /* the voltage of display point idx as drawn (panned view while X-moved) */
 {
@@ -1092,7 +1092,7 @@ static void UartPanel(void)
              hold_active ? "ON" : "OFF", osc_calib ? "AC" : "DC",
              osc_stable ? "AUTO" : "ROLL", osc_trig_fall ? "FALL" : "RISE", osc_det);
     UartPrint(b);
-    UartPrint(osc_auto_tb ? "\r\n TimeBase: AUTO (change T/DIV = manual, z = AUTO again)" : "\r\n TimeBase: MANUAL (z = AUTO)");
+    UartPrint(osc_auto_tb ? "\r\n TimeBase: CONTINUOUS AUTO (A; changing T/DIV = fixed)" : "\r\n TimeBase: FIXED (z = one-shot autoscale, A = continuous auto)");
     snprintf(b, sizeof(b), "\r\n Mode:%s%s  MOVE:%c (frozen only)  offY:%d (0.1 div)  offX:%d pts",
              slow_active ? "SLOW" : "FAST", osc_auto_tb ? "" : "*", mv_axis_x ? 'X' : 'Y', mv_y_steps, mv_x_pts);
     UartPrint(b);

@@ -144,6 +144,12 @@ main='''int main(void){int failures=0;
  float hf[]={150000,200000,300000,500000,800000,1000000,1150000,1500000,1800000,2000000,2100000};osc_tdiv_i=0;
  for(int fi=0;fi<11;fi++){input_f=hf[fi];adc_measure_n=3200;adc_meas_lvl=0;osc_fwin=1;for(int s=0;s<12;s++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();cases++;
   printf("HF %.0f -> %.1f\\n",input_f,osc_meas.freq);if(!osc_frame_valid||fabsf(osc_meas.freq/input_f-1)>.02f){printf("FAIL HF %.0f\\n",input_f);failures++;}}
+ /* v56: F is independent of the picture - read at the 1 ms/div power-on base (and 5 ms/div) as well */
+ 
+ {float hv[]={100000,2100000};int tv[]={8,10};for(int a2=0;a2<2;a2++)for(int fi=0;fi<2;fi++){input_f=hv[fi];osc_tdiv_i=tv[a2];adc_measure_n=3200;adc_meas_lvl=0;osc_fwin=1;for(int s=0;s<12;s++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();cases++;
+  printf(\"v56 F at tdiv %d: %.0f -> %.1f\\n\",tv[a2],input_f,osc_meas.freq);if(!osc_frame_valid||fabsf(osc_meas.freq/input_f-1)>.02f){printf(\"FAIL v56 F at tdiv %d %.0f\\n\",tv[a2],input_f);failures++;}}}
+ {float lv[]={1,10,30};for(int fi=0;fi<3;fi++){input_f=lv[fi];osc_tdiv_i=8;adc_measure_n=3200;adc_meas_lvl=0;osc_fwin=1;for(int s=0;s<20;s++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();
+  printf(\"v56 FAST 1 ms/div, %.0f Hz -> F=%.2f (0 = unreadable by FAST, no false value)\\n\",input_f,osc_meas.freq);if(osc_meas.freq>0.5f&&fabsf(osc_meas.freq/input_f-1)>.05f){printf(\"FAIL false F\\n\");failures++;}}}
  input_f=900000;adc_measure_n=3200;adc_meas_lvl=0;osc_tdiv_i=0;for(int s=0;s<12;s++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();
  printf("900 kHz alias check -> %.1f\\n",osc_meas.freq);if(fabsf(osc_meas.freq/900000-1)>.02f){printf("FAIL alias 900k\\n");failures++;}
  input_f=2300000;adc_measure_n=3200;adc_meas_lvl=0;for(int s=0;s<12;s++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();
@@ -202,7 +208,7 @@ main='''int main(void){int failures=0;
   input_noise=0; input_f=1000; }
 
  {   /* EDGE JITTER: the rising edge must land on the same screen position frame after frame ("shudder" < 1 point peak-to-peak) */
-  float lo=1e9,hi=-1e9; int fr=0; input_f=200; input_amp=620; input_dc=2048; input_noise=85; wave=0; osc_tdiv_i=8; osc_fwin=5; osc_stable=1;
+  srand(1); float lo=1e9,hi=-1e9; int fr=0; input_f=200; input_amp=620; input_dc=2048; input_noise=85; wave=0; osc_tdiv_i=8; osc_fwin=5; osc_stable=1;
   for(int ph=0; ph<150; ph++){ phase=0.05f+ph*0.37f; adc_measure_n=3200; adc_meas_lvl=0; AdcCaptureFrame(); if(!osc_frame_valid) continue; fr++;
     float mid=2048.0f; float pos=-1; for(int i=1;i<240;i++) if(raw_samples[i-1]<mid && raw_samples[i]>=mid){ pos=i+(mid-raw_samples[i-1])/(float)(raw_samples[i]-raw_samples[i-1]); break; }
     if(pos<0) continue; if(pos<lo)lo=pos; if(pos>hi)hi=pos; }
