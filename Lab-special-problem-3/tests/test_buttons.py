@@ -292,7 +292,7 @@ static char log_[256]; static int panels;
 static int gen_wave, osc_calib=1; static float gen_freq=1000, gen_amp=0.5f, gen_dc=1.65f, gen_noise=0.05f, gen_ph; static uint8_t osc_dirty, osc_stable, hold_active; static int osc_sidx, osc_c1, osc_c2;
 static void OscSetIndex(int i){ char b[16]; snprintf(b,16,"S%d,",i); LOG(b); }
 static void ActUp(int n){ (void)n; LOG("UP,"); } static void ActDown(int n){ (void)n; LOG("DOWN,"); } static void ActFreeze(void){ LOG("FREEZE,"); }
-static void ActToggleMoveAxis(void){ LOG("AXIS,"); } static void ActMoveCenter(void){ LOG("ZERO,"); } static void ActToggleFastSlow(void){ LOG("FS,"); } static void ActAutoMode(void){ LOG("AUTOMODE,"); } static void ActAuto(void){ LOG("AUTO,"); }
+static void ActToggleMoveAxis(void){ LOG("AXIS,"); } static void ActMoveCenter(void){ LOG("ZERO,"); } static void ActToggleFastSlow(void){ LOG("FS,"); } static void ActAutoMode(void){ LOG("AUTOMODE,"); } static void ActAuto(void){ LOG("AUTO,"); } static void ActZoom(int d){ LOG(d>0?"ZIN,":"ZOUT,"); }
 static void OscAdjust(int d){ (void)d; LOG("ADJ,"); }
 static int OscClampI(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); } static float OscClampF(float v,float lo,float hi){ return v<lo?lo:(v>hi?hi:v); }
 static void UartPanel(void){ panels++; } static float UartArgF(const char*s,float d){ return s&&*s&&*s!='+'&&*s!='-'?(float)atof(s):d; }

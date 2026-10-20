@@ -347,6 +347,9 @@ static int      mv_x_min    = 0, mv_x_max = 0;   /* pan range that the frozen ca
 static uint8_t  mv_axis_x   = 0;        /* 0 = MOVE:Y, 1 = MOVE:X */
 static uint8_t  mv_prev_hold = 0;       /* freeze edge detector */
 static uint8_t  mv_view_on  = 0;        /* 1 = the panned view mv_view_v is drawn instead of osc_v */
+static uint8_t  mv_zoom_x   = 1;        /* v57: time zoom x1..x16 (frozen only) */
+static uint8_t  mv_zoom_y   = 1;        /* v57: volt zoom x1..x8 (frozen only) */
+static int      mv_x_q      = 0;        /* v57: pan in 1/16 display point while mv_zoom_x > 1 (mv_x_pts = floor(mv_x_q/16)) */
 static float    mv_view_v[N_SAMPLES];
 
 /* --- UART RX ring buffer --- */
@@ -955,14 +958,72 @@ static float MvShownV(int idx)               /* the voltage of display point idx
 static void MvReset(void)                    /* offsets back to zero: the picture is the captured one again */
 {
     mv_y_steps = 0; mv_x_pts = 0; mv_view_on = 0;
+    mv_zoom_x = 1; mv_zoom_y = 1; mv_x_q = 0;      /* v57: zoom back to x1 */
     osc_dirty = 1;
 }
 
 static void MvSync(void)                     /* freeze / unfreeze edge: called from every Act*() and once per main-loop pass */
 {
-    if (hold_active && !mv_prev_hold)      { mv_y_steps = 0; mv_x_pts = 0; mv_view_on = 0; MvFreezeCapture(); }
+    if (hold_active && !mv_prev_hold)      { mv_y_steps = 0; mv_x_pts = 0; mv_view_on = 0; mv_zoom_x = 1; mv_zoom_y = 1; mv_x_q = 0; MvFreezeCapture(); }
     else if (!hold_active && mv_prev_hold) { MvReset(); mv_x_min = mv_x_max = 0; }
     mv_prev_hold = hold_active;
+}
+
+/* v57 ZOOM (frozen only). X: the view is 1/N of the screen around the screen centre; the pan (1/16 display point) may go as far as the stored data allows.
+ * Left edge of the view = 120 - 120/N + p >= -nlo, right edge = 120 + 119/N + p <= 239 + nhi (N = 1 gives the v54 range). */
+static void MvSetPanQ(int q)
+{
+    int zx = mv_zoom_x;
+    q = OscClampI(q, mv_x_min * 16 - (1920 - 1920 / zx), mv_x_max * 16 + (1904 - 1904 / zx));
+    mv_x_q = q;
+    mv_x_pts = (q >= 0) ? (q / 16) : -((-q + 15) / 16);
+}
+
+static int MvZoomStep(int z, int dir, int zmax)
+{
+    z = (dir > 0) ? z * 2 : z / 2;
+    return OscClampI(z, 1, zmax);
+}
+
+static void ActZoom(int dir)                 /* '+' (dir +1) / '-' (dir -1): only while frozen, on the MOVE axis */
+{
+    MvSync();
+    if (!hold_active) return;
+    if (!mv_axis_x) {
+        mv_zoom_y = (uint8_t)MvZoomStep(mv_zoom_y, dir, 8);
+    } else {
+        int z = MvZoomStep(mv_zoom_x, dir, 16);
+        if (z != mv_zoom_x) {
+            int q = (mv_zoom_x > 1) ? mv_x_q : mv_x_pts * 16;
+            mv_zoom_x = (uint8_t)z;
+            if (z > 1) MvSetPanQ(q);
+            else { int r = q + 8; mv_x_pts = OscClampI((r >= 0) ? (r / 16) : -((-r + 15) / 16), mv_x_min, mv_x_max); mv_x_q = 0; }
+            MvBuildView();
+        }
+    }
+    osc_dirty = 1;
+}
+
+static void MvFmtT(char *b, int n, float t_ms)       /* header T field: effective T/DIV (T/DIV / zoom) */
+{
+    if (t_ms < 0.1f)       snprintf(b, (size_t)n, "T:%.2fus/d", (double)(t_ms * 1000.0f));
+    else if (t_ms < 1.0f)  snprintf(b, (size_t)n, "T:%.3fms/d", (double)t_ms);
+    else if (t_ms < 10.0f) snprintf(b, (size_t)n, "T:%.2fms/d", (double)t_ms);
+    else                   snprintf(b, (size_t)n, "T:%.1fms/d", (double)t_ms);
+}
+
+static void MvFmtV(char *b, int n, float v)          /* header V field: effective V/DIV (V/DIV / zoom) */
+{
+    if (v < 1.0f) snprintf(b, (size_t)n, "V:%.1fmV/d", (double)(v * 1000.0f));
+    else          snprintf(b, (size_t)n, "V:%.2fV/d", (double)v);
+}
+
+static void MvFmtZ(char *b, int n)                   /* header Z field */
+{
+    if (mv_zoom_x > 1 && mv_zoom_y > 1) snprintf(b, (size_t)n, "Z:x%d/x%d", mv_zoom_x, mv_zoom_y);
+    else if (mv_zoom_x > 1)             snprintf(b, (size_t)n, "Z:x%d   ", mv_zoom_x);
+    else if (mv_zoom_y > 1)             snprintf(b, (size_t)n, "Z:x%d   ", mv_zoom_y);
+    else                                snprintf(b, (size_t)n, "        ");
 }
 
 static void MvMove(int dir, int n)           /* dir +1 = UP / LEFT, -1 = DOWN / RIGHT; only called while frozen */
@@ -970,6 +1031,9 @@ static void MvMove(int dir, int n)           /* dir +1 = UP / LEFT, -1 = DOWN / 
     if (n < 1) n = 1;
     if (!mv_axis_x) {
         mv_y_steps = OscClampI(mv_y_steps + dir * n, -MV_Y_MAX_STEPS, MV_Y_MAX_STEPS);
+    } else if (mv_zoom_x > 1) {                          /* v57: zoomed: finer steps (1/40 of the VIEW), range = the stored data */
+        MvSetPanQ(mv_x_q - dir * n * (MV_X_STEP_PTS * 16 / mv_zoom_x));
+        MvBuildView();
     } else {
         int p = OscClampI(mv_x_pts - dir * n * MV_X_STEP_PTS, mv_x_min, mv_x_max);
         if (p != mv_x_pts) { mv_x_pts = p; MvBuildView(); }
@@ -1096,6 +1160,8 @@ static void UartPanel(void)
     snprintf(b, sizeof(b), "\r\n Mode:%s%s  MOVE:%c (frozen only)  offY:%d (0.1 div)  offX:%d pts",
              slow_active ? "SLOW" : "FAST", osc_auto_tb ? "" : "*", mv_axis_x ? 'X' : 'Y', mv_y_steps, mv_x_pts);
     UartPrint(b);
+    snprintf(b, sizeof(b), "\r\n Zoom: X x%d  Y x%d  (frozen only; + in / - out on the MOVE axis)", mv_zoom_x, mv_zoom_y);   /* v57 */
+    UartPrint(b);
 
     UartPrint("\r\n== FUNCTION GENERATOR (input) ================");
     snprintf(b, sizeof(b), "\r\n Wave:%s  Freq:%d Hz",
@@ -1121,14 +1187,14 @@ static void UartPanel(void)
         UartNum("\r\n U1:", MvShownV(osc_c1 + osc_plot_offset), " V");  UartNum("   U2:", MvShownV(osc_c2 + osc_plot_offset), " V");
         UartNum("   dV:", MvShownV(osc_c2 + osc_plot_offset) - MvShownV(osc_c1 + osc_plot_offset), " V");
         snprintf(b, sizeof(b), "   dt: %d us",
-                 (int)(((float)(osc_c2 - osc_c1) / osc_fs_eff) * 1e6f));
+                 (int)(((float)(osc_c2 - osc_c1) / osc_fs_eff) * 1e6f / (float)mv_zoom_x));
         UartPrint(b);
     }
     UartNum("\r\n Calib offset:", osc_offset_ct, " cts");
     UartNum("   Dev:", osc_offset_ct - (float)ADC_MID, " cts");
     UartPrint("\r\n----------------------------------------------");
     UartPrint("\r\n keys: s=SET u=UP d=DOWN h=HOLD g=gen m=auto/roll z=autoscale ?=status");
-    UartPrint("\r\n v54:  h=freeze z=auto u/d=up/left,down/right (frozen=move) x=MOVE:Y/X 0=recenter F=FAST<>SLOW(forced*) A=auto FAST/SLOW");
+    UartPrint("\r\n v54:  h=freeze z=auto u/d=up/left,down/right (frozen=move) x=MOVE:Y/X 0=recenter F=FAST<>SLOW(forced*) A=auto FAST/SLOW +/-=zoom in/out (frozen, MOVE axis)");
     UartPrint("\r\n ctrl: m a=auto(นิ่ง) m r=roll(ไถล) | พิมพ์คีย์เดี่ยวได้เลยไม่ต้อง Enter");
     UartPrint("\r\n  w=wave f<Hz> a<V> o<Vdc> n<Vnoise> v[+|-] t[+|-] c1<n> c2<n> cal<0|1>");
     UartPrint("\r\n> ");
@@ -1157,6 +1223,8 @@ static void UartCommand(char *line)
         case 'h': case 'r': ActFreeze(); break;                         /* HOLD  */
         case 'x': ActToggleMoveAxis(); break;                           /* MOVE:Y <-> MOVE:X */
         case '0': ActMoveCenter(); break;                               /* re-centre */
+        case '+': ActZoom(+1); break;                                   /* v57: zoom in (frozen only) */
+        case '-': ActZoom(-1); break;                                   /* v57: zoom out (frozen only) */
         case 'F': ActToggleFastSlow(); break;                           /* force FAST <-> SLOW (upper case: 'f' is the generator frequency) */
         case 'A': ActAutoMode(); break;                                 /* automatic FAST/SLOW again (upper case: 'a' is the generator amplitude) */
         case 'g':                                                       /* gen ใหม่ */
@@ -1228,6 +1296,11 @@ static void UartPoll(void)
             continue;
         }
         /* ทำทันทีเฉพาะคีย์ที่ไม่มีรูปแบบ "มีค่า" เท่านั้น (s/u/d/h/g/m ต้องรอ idle) */
+        if (uart_len == 0 && (c == '+' || c == '-')) {         /* v57: zoom keys; "v +" / "t -" start with a letter, so a leading +/- is free */
+            uart_line[0] = c; uart_line[1] = 0;
+            UartCommand(uart_line);
+            continue;
+        }
         if (uart_len == 0 && strchr("sdhg?zxFA0", c)) {
             uart_line[0] = c; uart_line[1] = 0;
             UartCommand(uart_line);
@@ -1428,7 +1501,7 @@ static void MapToScreen(int trig_offset)
 
         /* Convert count -> voltage -> pixel offset */
         float v = vs[src];
-        int y = CENTER_Y - (int)(v / volts_per_div * (float)GRID_Y_STEP) - mv_y_steps * GRID_Y_STEP / 10;   /* v54: Y move (0 = v53) */
+        int y = CENTER_Y - (int)(v / volts_per_div * (float)(GRID_Y_STEP * mv_zoom_y)) - mv_y_steps * GRID_Y_STEP / 10;   /* v54: Y move (0 = v53) */
 
         /* Clamp to waveform area only (do not draw over header) */
         if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
@@ -1720,11 +1793,13 @@ static void DrawTopPanel(void)
     int sel_tdiv = (strcmp(selname, "T/DIV") == 0);
 
     /* V/div — x=2 (MAGENTA = กำลังปรับตัวนี้อยู่) */
-    snprintf(buf, sizeof(buf), "V:%.1fV/d", (double)volts_per_div);
+    if (hold_active && mv_zoom_y > 1) MvFmtV(buf, sizeof(buf), volts_per_div / (float)mv_zoom_y);   /* v57: effective V/DIV while zoomed */
+    else snprintf(buf, sizeof(buf), "V:%.1fV/d", (double)volts_per_div);
     HDRT(buf, 2, 1, sel_vdiv ? MAGENTA : YELLOW, 1, BLACK);
 
     /* T/div label — x=72 */
-    if (osc_capture_tdiv < 0.1f) snprintf(buf, sizeof(buf), "T:%.0fus/d ", (double)(osc_capture_tdiv * 1000.0f));   /* 5/10/15/20/50 us */
+    if (hold_active && mv_zoom_x > 1) MvFmtT(buf, sizeof(buf), osc_capture_tdiv / (float)mv_zoom_x);   /* v57: effective T/DIV while zoomed */
+    else if (osc_capture_tdiv < 0.1f) snprintf(buf, sizeof(buf), "T:%.0fus/d ", (double)(osc_capture_tdiv * 1000.0f));   /* 5/10/15/20/50 us */
     else                         snprintf(buf, sizeof(buf), "T:%.1fms/d", (double)osc_capture_tdiv);
     HDRT(buf, 72, 1, sel_tdiv ? MAGENTA : WHITE, 1, BLACK);
 
@@ -1757,12 +1832,14 @@ static void DrawTopPanel(void)
         snprintf(buf, sizeof(buf), "dV=%.2fV", (double)(MvShownV(osc_c2 + osc_plot_offset) - MvShownV(osc_c1 + osc_plot_offset)));
         HDRT(buf, 148, 10, YELLOW, 1, BLACK);
         snprintf(buf, sizeof(buf), "dt=%.2fms",
-                 (double)((float)(osc_c2 - osc_c1) / osc_fs_eff * 1000.0f));
+                 (double)((float)(osc_c2 - osc_c1) / osc_fs_eff * 1000.0f / (float)mv_zoom_x));   /* v57: cursor distance in time shrinks with the zoom */
         HDRT(buf, 2, 20, YELLOW, 1, BLACK);
         snprintf(buf, sizeof(buf), "MOVE:%c", mv_axis_x ? 'X' : 'Y');                  /* v54: frozen only */
         HDRT(buf, 72, 20, ORANGE, 1, BLACK);
         snprintf(buf, sizeof(buf), "%s%s ", slow_active ? "SLOW" : "FAST", osc_auto_tb ? "" : "*");   /* * = forced */
         HDRT(buf, 148, 20, osc_auto_tb ? GREEN : ORANGE, 1, BLACK);
+        MvFmtZ(buf, sizeof(buf));                                                        /* v57 */
+        HDRT(buf, 200, 20, CYAN, 1, BLACK);
     } else {
     snprintf(buf, sizeof(buf), "Vp:%.2fV", (double)osc_meas.vpp);
     HDRT(buf, 2, 10, CYAN, 1, BLACK);
@@ -3060,6 +3137,11 @@ static int      mv_nlo = 0, mv_nhi = 0;                          /* how many of 
 static uint16_t mv_snap[SLOW_HIST_N];
 static uint32_t mv_snap_end = 0, mv_snap_period = 1000u;
 static uint8_t  mv_slow_mode = 0;
+/* v57 ZOOM data: a copy of the raw capture region behind the display window (the next DMA capture overwrites adc_raw_buf), taken together with the ext points. */
+static uint16_t mv_raw[ADC_RAW_MAX];
+static uint32_t mv_raw_off = 0, mv_raw_n = 0, mv_z_w = 1;     /* mv_raw[j] = adc_raw_buf[mv_raw_off + j]; mv_raw_n = 0: no raw data */
+static float    mv_z_step = 1.0f;
+static uint32_t mv_z_start = 0;
 
 static FAST_O2 void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n)
 {
@@ -3082,6 +3164,15 @@ static FAST_O2 void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t 
         for (uint32_t q = 0; q < w; q++) acc += adc_raw_buf[(uint32_t)lo + q];
         mv_ext_hi[cnt] = (uint16_t)(acc / w);
         mv_nhi = cnt + 1;
+    }
+    {   /* v57: keep the raw samples of everything the pan can show (FAST_O2 memcpy of at most ADC_RAW_MAX samples) */
+        float lo_f = (float)start - ((float)mv_nlo + 1.0f) * step - (float)w;
+        float hi_f = (float)start + ((float)(N_SAMPLES + mv_nhi) + 1.0f) * step + 2.0f * (float)w + 2.0f;
+        uint32_t a = (lo_f > 0.0f) ? (uint32_t)lo_f : 0u, b = (hi_f < (float)n) ? (uint32_t)hi_f : n;
+        if (b > ADC_RAW_MAX) b = ADC_RAW_MAX;
+        if (b > a) { memcpy(mv_raw, &adc_raw_buf[a], (size_t)(b - a) * sizeof(uint16_t)); mv_raw_off = a; mv_raw_n = b - a; }
+        else mv_raw_n = 0;
+        mv_z_start = start; mv_z_step = step; mv_z_w = w;
     }
 }
 
@@ -3131,9 +3222,76 @@ static uint16_t MvSlowPoint(int j, int pan)  /* display point j of the SLOW wind
     }
 }
 
+/* v57: time zoom. Output pixel i shows display position u = (1920 + (i - 120) * 16 / N + mv_x_q) / 16 of the frozen picture (N = mv_zoom_x).
+ * FAST: raw position r = start + u * step. Pixels are step/N raw samples apart: >= 1 -> boxcar of round(w/N) raw samples (real detail),
+ *       < 1 (or no raw copy) -> linear interpolation between neighbours. SLOW: the frozen 1 ms history, same rule (interpolate below 1 ms, average above).
+ * The display filter shrinks with the zoom (window / N) so the extra detail is not smeared away again. */
+static float MvZoomCount(int32_t U)
+{
+    const int N = mv_zoom_x;
+    if (mv_slow_mode) {
+        uint32_t period = mv_snap_period, t_end = mv_snap_end;
+        int64_t off64 = ((int64_t)((N_SAMPLES - 1) * 16) - (int64_t)U) * (int64_t)period / 16;
+        uint32_t off_us = (off64 > 0) ? (uint32_t)off64 : 0u, span = period / (uint32_t)N;
+        if (span < 1000u) {
+            uint32_t off_ms = off_us / 1000u, rem = off_us % 1000u;
+            uint32_t t_low = (t_end - 1u) - off_ms - (rem ? 1u : 0u);
+            uint32_t a = mv_snap[t_low & (SLOW_HIST_N - 1u)];
+            uint32_t b = rem ? mv_snap[(t_low + 1u) & (SLOW_HIST_N - 1u)] : a;
+            return (float)((a * rem + b * (1000u - rem)) / 1000u);
+        } else {
+            uint32_t off_a = (off_us + span + 999u) / 1000u, off_b = (off_us + 999u) / 1000u, sum = 0, c = 0;
+            for (uint32_t tk = t_end - off_a; tk != t_end - off_b; tk++) { sum += mv_snap[tk & (SLOW_HIST_N - 1u)]; c++; }
+            return (float)(c ? (sum / c) : mv_snap[(t_end - off_b) & (SLOW_HIST_N - 1u)]);
+        }
+    }
+    if (mv_raw_n > 0) {
+        float r = (float)mv_z_start + ((float)U / 16.0f) * mv_z_step - (float)mv_raw_off;     /* index inside mv_raw */
+        float sp = mv_z_step / (float)N;
+        int last = (int)mv_raw_n - 1;
+        if (sp >= 1.0f) {
+            int w2 = ((int)mv_z_w + N / 2) / N, lo; if (w2 < 1) w2 = 1;
+            lo = (int)floorf(r + 0.5f) - (w2 - 1) / 2;
+            if (lo + w2 > last + 1) lo = last + 1 - w2;
+            if (lo < 0) lo = 0;
+            if (lo + w2 > last + 1) w2 = last + 1 - lo;
+            { uint32_t acc = 0; for (int q = 0; q < w2; q++) acc += mv_raw[lo + q]; return (float)acc / (float)w2; }
+        } else {
+            int i0 = (int)floorf(r); float fr = r - (float)i0; int i1 = i0 + 1;
+            i0 = OscClampI(i0, 0, last); i1 = OscClampI(i1, 0, last);
+            return (float)mv_raw[i0] + ((float)mv_raw[i1] - (float)mv_raw[i0]) * fr;
+        }
+    }
+    {   /* no stored samples: straight lines between the 240 display points */
+        float u = (float)U / 16.0f; int i0; float fr;
+        if (u < 0.0f) u = 0.0f;
+        if (u > (float)(N_SAMPLES - 1)) u = (float)(N_SAMPLES - 1);
+        i0 = (int)floorf(u); fr = u - (float)i0;
+        return (float)raw_samples[i0] + (float)(raw_samples[OscClampI(i0 + 1, 0, N_SAMPLES - 1)] - raw_samples[i0]) * fr;
+    }
+}
+
+static void MvBuildZoom(void)
+{
+    float cnt[N_SAMPLES];
+    const float kv = ADC_VREF / (float)ADC_FULL;
+    int win = (osc_fwin < 1) ? 1 : osc_fwin, half, zw;
+    if ((win % 2) == 0) win++;
+    zw = win / mv_zoom_x; if (zw < 1) zw = 1; if ((zw % 2) == 0) zw++;
+    half = zw / 2;
+    for (int i = 0; i < N_SAMPLES; i++) cnt[i] = MvZoomCount(1920 + (i - N_SAMPLES / 2) * (16 / mv_zoom_x) + mv_x_q);
+    for (int i = 0; i < N_SAMPLES; i++) {
+        float acc = 0.0f;
+        for (int j = -half; j <= half; j++) acc += cnt[OscClampI(i + j, 0, N_SAMPLES - 1)];
+        mv_view_v[i] = (acc / (float)zw - osc_offset_ct) * kv;
+    }
+    mv_view_on = 1;
+}
+
 static void MvBuildView(void)                /* mv_view_v[] = the frozen capture panned by mv_x_pts (same calibration + filter as OscProcessFrame) */
 {
     float cnt[N_SAMPLES];
+    if (mv_zoom_x > 1) { MvBuildZoom(); return; }       /* v57 */
     const float kv = ADC_VREF / (float)ADC_FULL;
     int win = (osc_fwin < 1) ? 1 : osc_fwin, half;
     if ((win % 2) == 0) win++;

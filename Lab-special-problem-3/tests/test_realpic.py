@@ -105,7 +105,7 @@ exec(compile(harness_py, 'realpic_harness', 'exec'), ns)
 
 # ---- contracts on the text of main.c ------------------------------------------------------------------------------------
 src = (ROOT/'Core/Src/main.c').read_text()
-before = ROOT.parent/'builds/v56/main_before.c'
+before = ROOT.parent/'builds/v57/main_before.c'
 def slow_text(t): return t[t.index('SLOW_BEGIN ='):t.index('SLOW_END =')]
 bt = before.read_text() if before.exists() else None
 def has(p): return re.search(p, src) is not None
@@ -119,17 +119,17 @@ contracts = [
  ("only OscAutoRearm ('A') sets osc_auto_tb = 1", len(set_sites()) == 1 and 'static void OscAutoRearm(void)' in src[src.rfind('static void', 0, set_sites()[0]):set_sites()[0]+40]),
  ("'z' path (OscAutoScale) does not touch osc_auto_tb", 'osc_auto_tb' not in src[src.index('static void OscAutoScale(void)'):src.index('static float SlowProbeFreq')].replace('/* v56: one-shot. \'z\' does not touch osc_auto_tb (continuous auto time base only via \'A\') */','')),
  ('boot state saved: main_before.c exists', bt is not None),
- ('Slow block byte-identical to main_before.c (v55)', bt is not None and slow_text(src) == slow_text(bt)),
+ ('Slow block byte-identical to main_before.c (v56)', bt is not None and slow_text(src) == slow_text(bt)),
 ]
 if bt is not None:
     def fn(t, name):
         m = re.search(r'^static [^\n;]*\b'+name+r'\(', t, re.M); a = m.start(); p = t.index('{', a); d = 1; q = p+1
         while d: d += (t[q]=='{') - (t[q]=='}'); q += 1
         return t[a:q]
-    for name in ['OscMeasureFrame', 'OscProcessFrame', 'AdcCaptureFrame', 'OscAutoTimebase', 'OscManualToggle', 'OscAutoApply', 'OscAutoScaleStep', 'OscAutoPickTdiv', 'ActToggleFastSlow', 'ActAutoMode', 'OscAutoRearm', 'OscAdjust', 'UartCommand']:
-        contracts.append(('function unchanged vs v55: '+name, fn(src, name) == fn(bt, name)))
+    for name in ['OscMeasureFrame', 'OscProcessFrame', 'AdcCaptureFrame', 'OscAutoTimebase', 'OscManualToggle', 'OscAutoApply', 'OscAutoScaleStep', 'OscAutoPickTdiv', 'ActToggleFastSlow', 'ActAutoMode', 'OscAutoRearm', 'OscAdjust']:
+        contracts.append(('function unchanged vs v56: '+name, fn(src, name) == fn(bt, name)))
     diff = [l for l in difflib.unified_diff(bt.splitlines(), src.splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
-    contracts.append(('whole-file diff vs v55 is small (<= 16 changed lines): %d' % len(diff), len(diff) <= 16))
+    contracts.append(('whole-file diff vs v56 is small (<= 300 changed lines; the tight v57 contract is in test_zoom): %d' % len(diff), len(diff) <= 300))
 cfail = sum(not ok for _, ok in contracts)
 for n, ok in contracts: print(('PASS ' if ok else 'FAIL ') + n)
 print('contract failures=%d' % cfail)

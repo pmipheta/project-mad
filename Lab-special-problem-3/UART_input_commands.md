@@ -323,3 +323,15 @@ Generator ไล่ตามเวลาจริงต่อเนื่อง 
 - `F` = toggle FAST/SLOW by hand (picks a sensible T/DIV for that mode). T/DIV ≥ 10 ms/div runs the SLOW engine, faster ones FAST.
 - Picture default is **trigger-locked** (`m a`); `m r` = roll, `m` toggles. Without a trigger edge (or below ~45 Hz in FAST) the free-running capture is shown.
 - A signal that does not fit the chosen T/DIV is shown as it really is (flat line / dense band); press `z`. Numbers (Vpp/Vmax/Vmin/RMS/F) are measured independently of the picture. FAST cannot read F below ~40 Hz, so F shows 0 until you press `z` / `F` (SLOW).
+
+## v57 — zoom on the frozen picture (`+` / `-`)
+| Key | Does (only while frozen, `h`) |
+|---|---|
+| `+` | zoom in on the current MOVE axis (`x` toggles MOVE:Y / MOVE:X) |
+| `-` | zoom out |
+
+- Immediate keys (no Enter). `v +`, `v -`, `t +`, `t -` are unchanged (a line that starts with a letter is a line command; only a leading `+`/`-` is a zoom key).
+- **MOVE:X = time zoom** x1, x2, x4, x8, x16 around the screen centre. **MOVE:Y = volt zoom** x1, x2, x4, x8 around the centre line. `u`/`d` still pan; at xN the view is 1/N of the screen and the pan range grows within the stored data (finer steps: 1/40 of the view).
+- FAST: real raw samples of the frozen capture are used (a copy kept for the pan/zoom); below one raw sample per pixel, or without stored samples, points are joined by straight lines. SLOW: the frozen 1 ms history copy, same rule.
+- Header while zoomed: `Z:x4` (or `Z:x4/x2` = X/Y), and the T / V fields show the effective T/DIV (T/DIV ÷ N) or V/DIV (V/DIV ÷ N); cursor `dt` is divided by the time zoom.
+- Not frozen: `+`/`-` do nothing. Unfreeze (`h`), `0` and AUTO (`z`) reset the zoom to x1. Vpp / F are unchanged (whole frozen capture). `?` prints `Zoom: X xN  Y xN`.

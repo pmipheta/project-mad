@@ -82,7 +82,7 @@ static float AdcRateHz(int l);static uint8_t AdcSetRateLevel(int l);
 #define OSC_FIT_CYCLES 2.5f
 #define FAST_O2_UNUSED
 static void MvStoreExt(uint32_t start,float step,uint32_t w,uint32_t n);static int OscAutoPickTdiv(float f);static void OscAutoApply(float vpp,int ti);static int AtbPickFast(float f);static int AtbPickSlow(float f);
-static uint16_t mv_ext_lo[MV_EXT_MAX],mv_ext_hi[MV_EXT_MAX];static int mv_nlo,mv_nhi,mv_y_steps,mv_view_on;static float mv_view_v[240];
+static uint16_t mv_ext_lo[MV_EXT_MAX],mv_ext_hi[MV_EXT_MAX];static int mv_nlo,mv_nhi,mv_y_steps,mv_view_on; static uint8_t mv_zoom_y=1;static float mv_view_v[240];
 static uint8_t osc_auto_stage,osc_auto_tries,hold_active,osc_auto_tb=1;
 static volatile uint8_t slow_active;
 static float dbg_auto_fsel;
