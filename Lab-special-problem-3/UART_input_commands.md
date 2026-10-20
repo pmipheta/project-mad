@@ -327,11 +327,11 @@ Generator ไล่ตามเวลาจริงต่อเนื่อง 
 ## v57 — zoom on the frozen picture (`+` / `-`)
 | Key | Does (only while frozen, `h`) |
 |---|---|
-| `+` | zoom in on the current MOVE axis (`x` toggles MOVE:Y / MOVE:X) |
+| `+` | zoom in: time AND volts together (v59 combined zoom; the MOVE axis does not matter) |
 | `-` | zoom out |
 
 - Immediate keys (no Enter). `v +`, `v -`, `t +`, `t -` are unchanged (a line that starts with a letter is a line command; only a leading `+`/`-` is a zoom key).
-- **MOVE:X = time zoom** x1, x2, x4, x8, x16 around the screen centre. **MOVE:Y = volt zoom** x1, x2, x4, x8 around the centre line. `u`/`d` still pan; at xN the view is 1/N of the screen and the pan range grows within the stored data (finer steps: 1/40 of the view).
+- **Combined zoom (v59):** one zoom step 0..6 drives both axes. Time x1, x2, x4, x8, x16, x32, x64 around the screen centre; volts x1, x2, x4, x8, x16, x32 around the centre line (volts stop at x32, so the 6th `+` zooms only time: x64/x32; `-` mirrors it). `x` (MOVE:Y / MOVE:X) now ONLY chooses what `u`/`d` pan (vertical offset vs horizontal). `u`/`d` pan; at xN the view is 1/N of the screen and the pan range grows within the stored data (finer steps: 1/40 of the view).
 - FAST: real raw samples of the frozen capture are used (a copy kept for the pan/zoom); below one raw sample per pixel, or without stored samples, points are joined by straight lines. SLOW: the frozen 1 ms history copy, same rule.
-- Header while zoomed: `Z:x4` (or `Z:x4/x2` = X/Y), and the T / V fields show the effective T/DIV (T/DIV ÷ N) or V/DIV (V/DIV ÷ N); cursor `dt` is divided by the time zoom.
-- Not frozen: `+`/`-` do nothing. Unfreeze (`h`), `0` and AUTO (`z`) reset the zoom to x1. Vpp / F are unchanged (whole frozen capture). `?` prints `Zoom: X xN  Y xN`.
+- Header while zoomed: `Z:x4` (both axes equal) or `Z:64/32` (time/volt, only at the top step), and the T / V fields show the effective T/DIV (T/DIV ÷ N) or V/DIV (V/DIV ÷ N); cursor `dt` is divided by the time zoom.
+- Not frozen: `+`/`-` do nothing. Unfreeze (`h`), `0` and AUTO (`z`) reset the zoom to x1. Vpp / F are unchanged (whole frozen capture). `?` prints `Zoom: X xN  Y xN`. Unfreeze, `0` and AUTO reset the shared step to 0.

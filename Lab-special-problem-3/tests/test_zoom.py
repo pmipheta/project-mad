@@ -15,7 +15,7 @@ tail = tb[tail_start:tail_end]
 
 main_c = r'''
 #define KV (3.3f/4095.0f)
-static void zfresh(void){ fresh(); mv_zoom_x=1; mv_zoom_y=1; mv_x_q=0; mv_raw_n=0; mv_nlo=mv_nhi=0; mv_slow_mode=0; slow_active=0; osc_fwin=1; osc_offset_ct=2048.0f; mv_axis_x=0; }
+static void zfresh(void){ fresh(); mv_zoom_x=1; mv_zoom_y=1; mv_zoom_step=0; mv_x_q=0; mv_raw_n=0; mv_nlo=mv_nhi=0; mv_slow_mode=0; slow_active=0; osc_fwin=1; osc_offset_ct=2048.0f; mv_axis_x=0; }
 static void to_osc_v(void){ for(int i=0;i<N_SAMPLES;i++) osc_v[i]=((float)raw_samples[i]-osc_offset_ct)*KV; }
 /* FAST capture model: 2 sine cycles over the screen (+ optional period-4 square ripple that a boxcar of w=8 removes) */
 static double SINP(double j,double step){ return 2048.0 + 600.0*sin(6.283185307179586*j/(240.0*step/2.0)); }
@@ -41,25 +41,33 @@ int main(void){
   check("not frozen: '+' changes nothing (X and Y axis)", mv_zoom_x==1 && mv_zoom_y==1 && mv_view_on==0 && hold_active==0);
   { volts_per_div=1.0f; for(int i=0;i<N_SAMPLES;i++) osc_v[i]=0.5f; MapToScreen(0); check("not frozen: picture unchanged (0.5 V at 1 V/div = 20 px above centre)", new_y[7]==100); }
 
-  /* ---- 2. limits: X max 16, Y max 8, min 1 ---- */
-  zfresh(); ActFreeze(); mv_axis_x=1; { int seq[8], ok=1; for(int i=0;i<7;i++){ ActZoom(+1); seq[i]=mv_zoom_x; }
-    snprintf(nm,sizeof nm,"X zoom in x7: %d %d %d %d %d %d %d (2 4 8 16 16 16 16)",seq[0],seq[1],seq[2],seq[3],seq[4],seq[5],seq[6]);
-    check(nm, seq[0]==2&&seq[1]==4&&seq[2]==8&&seq[3]==16&&seq[4]==16&&seq[5]==16&&seq[6]==16&&mv_zoom_y==1); (void)ok; }
-  for(int i=0;i<8;i++) ActZoom(-1); check("X zoom out below 1 stays 1", mv_zoom_x==1);
-  mv_axis_x=0; { int s[6]; for(int i=0;i<6;i++){ ActZoom(+1); s[i]=mv_zoom_y; }
-    snprintf(nm,sizeof nm,"Y zoom in x6: %d %d %d %d %d %d (2 4 8 8 8 8)",s[0],s[1],s[2],s[3],s[4],s[5]);
-    check(nm, s[0]==2&&s[1]==4&&s[2]==8&&s[3]==8&&s[5]==8&&mv_zoom_x==1); }
-  for(int i=0;i<6;i++) ActZoom(-1); check("Y zoom out below 1 stays 1", mv_zoom_y==1);
-  mv_axis_x=0; ActZoom(+1); mv_axis_x=1; ActZoom(+1); ActZoom(+1); check("zoom follows the MOVE axis: Y x2 and X x4 independent", mv_zoom_y==2 && mv_zoom_x==4);
+  /* ---- 2. v59 combined zoom: one shared step, X 1..64, Y 1..32, MOVE axis irrelevant ---- */
+  { static const int EX[8]={2,4,8,16,32,64,64,64}, EY[8]={2,4,8,16,32,32,32,32}; int okx=1, oky=1, oks=1;
+    zfresh(); ActFreeze();
+    for(int i=0;i<8;i++){ ActZoom(+1); if(mv_zoom_x!=EX[i])okx=0; if(mv_zoom_y!=EY[i])oky=0; if(mv_zoom_step!=(i<6?i+1:6))oks=0; if(i<5 && mv_zoom_x!=mv_zoom_y)oks=0; }
+    check("(a) zoom in x8: X 2 4 8 16 32 64 64 64", okx); check("(a) zoom in x8: Y 2 4 8 16 32 32 32 32 (lockstep to step 5, Y pinned at 32 at step 6)", oky); check("(a) shared step 1..6 then pinned, X==Y for steps 1..5", oks);
+    check("(a) step 6 = X64 / Y32", mv_zoom_x==64 && mv_zoom_y==32 && mv_zoom_step==6);
+    /* (b) out: Y stays 32 while X 64->32, then both down together */
+    { static const int OX[8]={32,16,8,4,2,1,1,1}, OY[8]={32,16,8,4,2,1,1,1}; int ok=1;
+      for(int i=0;i<8;i++){ ActZoom(-1); if(mv_zoom_x!=OX[i]||mv_zoom_y!=OY[i]) ok=0; }
+      check("(b) zoom out: 64/32 -> 32/32 -> 16/16 ... 1/1, never below 1", ok); } }
+  { /* (c) MOVE axis toggle does not matter */
+    int ok=1; for(int ax=0; ax<2; ax++){ zfresh(); ActFreeze(); mv_axis_x=(uint8_t)ax; for(int i=0;i<3;i++) ActZoom(+1); if(mv_zoom_x!=8||mv_zoom_y!=8) ok=0; mv_axis_x=(uint8_t)!ax; ActZoom(+1); if(mv_zoom_x!=16||mv_zoom_y!=16) ok=0; ActZoom(-1); ActZoom(-1); if(mv_zoom_x!=4||mv_zoom_y!=4) ok=0; }
+    check("(c) '+'/'-' zoom both axes identically whatever MOVE:X/Y is, even toggling in between", ok); }
+  { /* (d) MOVE axis still selects the pan direction */
+    zfresh(); ActFreeze(); mv_axis_x=0; ActUp(2); check("(d) MOVE:Y: u moves the vertical offset only", mv_y_steps!=0 && mv_x_pts==0);
+    zfresh(); fast_setup(8.0f,100,800,0.0); ActFreeze(); mv_axis_x=1; ActZoom(+1); ActZoom(+1); ActDown(2); check("(d) MOVE:X (zoomed): d pans horizontally only", mv_y_steps==0 && mv_x_q!=0);
+    zfresh(); ActFreeze(); ActZoom(+1); ActZoom(+1); mv_axis_x=0; ActUp(1); check("(d) MOVE:Y while zoomed: offset moves, zoom unchanged", mv_y_steps!=0 && mv_zoom_x==4 && mv_zoom_y==4); }
 
   /* ---- 3. reset on unfreeze / '0' / AUTO ---- */
-  zfresh(); ActFreeze(); mv_axis_x=1; ActZoom(+1); ActZoom(+1); mv_axis_x=0; ActZoom(+1); ActFreeze();
-  check("unfreeze: zoom back to x1/x1", hold_active==0 && mv_zoom_x==1 && mv_zoom_y==1 && mv_view_on==0 && mv_x_q==0);
-  zfresh(); ActFreeze(); mv_axis_x=1; ActZoom(+1); mv_axis_x=0; ActZoom(+1); ActMoveCenter();
-  check("'0': zoom back to x1/x1 and stays frozen", hold_active==1 && mv_zoom_x==1 && mv_zoom_y==1 && mv_view_on==0);
-  zfresh(); ActFreeze(); mv_axis_x=1; ActZoom(+1); ActZoom(+1); mv_axis_x=0; ActZoom(+1); ActAuto();
-  check("AUTO: unfrozen, zoom x1/x1", hold_active==0 && mv_zoom_x==1 && mv_zoom_y==1 && osc_auto_stage==1);
-  zfresh(); hold_active=1; MvSync(); mv_zoom_x=4; mv_zoom_y=2; hold_active=0; MvSync(); check("freeze made elsewhere: unfreeze still resets zoom", mv_zoom_x==1 && mv_zoom_y==1);
+  zfresh(); ActFreeze(); ActZoom(+1); ActZoom(+1); ActZoom(+1); check("(e) shared step 3 before unfreeze", mv_zoom_step==3); ActFreeze();
+  check("(e) unfreeze: shared step 0, : zoom back to x1/x1", hold_active==0 && mv_zoom_x==1 && mv_zoom_y==1 && mv_zoom_step==0 && mv_view_on==0 && mv_x_q==0);
+  zfresh(); ActFreeze(); ActZoom(+1); ActZoom(+1); ActMoveCenter();
+  check("'0': zoom back to x1/x1 and stays frozen", hold_active==1 && mv_zoom_x==1 && mv_zoom_y==1 && mv_zoom_step==0 && mv_view_on==0);
+  zfresh(); ActFreeze(); ActZoom(+1); ActZoom(+1); ActZoom(+1); ActAuto();
+  check("AUTO: unfrozen, zoom x1/x1", hold_active==0 && mv_zoom_x==1 && mv_zoom_y==1 && mv_zoom_step==0 && osc_auto_stage==1);
+  zfresh(); hold_active=1; MvSync(); mv_zoom_x=4; mv_zoom_y=4; mv_zoom_step=2; hold_active=0; MvSync(); check("freeze made elsewhere: unfreeze still resets zoom", mv_zoom_x==1 && mv_zoom_y==1 && mv_zoom_step==0);
+  zfresh(); mv_zoom_step=5; mv_zoom_x=32; mv_zoom_y=32; hold_active=0; mv_prev_hold=0; hold_active=1; MvSync(); check("(e) fresh freeze edge: step 0", mv_zoom_step==0 && mv_zoom_x==1 && mv_zoom_y==1);
 
   /* ---- 4. header text: effective T/DIV and V/DIV ---- */
   { char b[40];
@@ -71,19 +79,32 @@ int main(void){
     MvFmtV(b,sizeof b,2.0f/2.0f);   check("V 2 V/div x2 -> 'V:1.00V/d'", strcmp(b,"V:1.00V/d")==0);
     MvFmtV(b,sizeof b,0.5f/8.0f);   check("V 0.5 V/div x8 -> 'V:62.5mV/d'", strcmp(b,"V:62.5mV/d")==0);
     zfresh(); mv_zoom_x=4; MvFmtZ(b,sizeof b);     check("Z text X only", strncmp(b,"Z:x4",4)==0);
-    mv_zoom_x=1; mv_zoom_y=8; MvFmtZ(b,sizeof b);  check("Z text Y only", strncmp(b,"Z:x8",4)==0);
-    mv_zoom_x=16; mv_zoom_y=2; MvFmtZ(b,sizeof b); check("Z text both", strcmp(b,"Z:x16/x2")==0);
+    mv_zoom_x=1; mv_zoom_y=8; MvFmtZ(b,sizeof b);  check("Z text Y only (not reachable via keys)", strncmp(b,"Z:x8",4)==0);
+    mv_zoom_x=16; mv_zoom_y=2; MvFmtZ(b,sizeof b); check("Z text differing pair", strcmp(b,"Z:16/2")==0);
+    mv_zoom_x=8; mv_zoom_y=8; MvFmtZ(b,sizeof b); snprintf(nm,sizeof nm,"(f) Z at step 3 (X8,Y8) -> '%s' (Z:x8)",b); check(nm, strncmp(b,"Z:x8",4)==0 && strlen(b)<=8);
+    mv_zoom_x=64; mv_zoom_y=32; MvFmtZ(b,sizeof b); snprintf(nm,sizeof nm,"Z text x64/x32 -> '%s' (Z:64/32, <=7 chars fits x=196..238)",b); check(nm, strcmp(b,"Z:64/32")==0 && strlen(b)<=7);
+    zfresh(); ActFreeze(); for(int i=0;i<6;i++) ActZoom(+1); MvFmtZ(b,sizeof b); check("(f) real step 6 via ActZoom: Z:64/32 (time/volt)", strcmp(b,"Z:64/32")==0);
+    zfresh(); ActFreeze(); for(int i=0;i<3;i++) ActZoom(+1); MvFmtZ(b,sizeof b); check("(f) real step 3 via ActZoom: Z:x8", strncmp(b,"Z:x8",4)==0);
+    mv_zoom_x=64; mv_zoom_y=1; MvFmtZ(b,sizeof b); check("Z text X x64 only", strncmp(b,"Z:x64",5)==0 && strlen(b)<=8);
+    mv_zoom_x=1; mv_zoom_y=32; MvFmtZ(b,sizeof b); check("Z text Y x32 only", strncmp(b,"Z:x32",5)==0 && strlen(b)<=8);
+    MvFmtT(b,sizeof b,0.005f/64.0f); snprintf(nm,sizeof nm,"T 5 us/div x64 -> '%s' (T:0.08us/d)",b); check(nm, strcmp(b,"T:0.08us/d")==0 && strlen(b)<=11);
+    MvFmtT(b,sizeof b,200.0f/64.0f); snprintf(nm,sizeof nm,"T 200 ms/div x64 -> '%s'",b); check(nm, strcmp(b,"T:3.12ms/d")==0 || strcmp(b,"T:3.13ms/d")==0);
+    MvFmtT(b,sizeof b,0.001f/64.0f); snprintf(nm,sizeof nm,"T 1 us/div x64 -> '%s' (well-formed, nonzero)",b); check(nm, strcmp(b,"T:0.02us/d")==0);
+    MvFmtV(b,sizeof b,0.5f/32.0f); snprintf(nm,sizeof nm,"V 0.5 V/div x32 -> '%s' (V:15.6mV/d)",b); check(nm, strcmp(b,"V:15.6mV/d")==0 && strlen(b)<=11);
+    MvFmtV(b,sizeof b,0.02f/32.0f); snprintf(nm,sizeof nm,"V 20 mV/div x32 -> '%s' (nonzero)",b); check(nm, strcmp(b,"V:0.6mV/d")==0);
+    mv_zoom_x=1; mv_zoom_y=1;
     mv_zoom_x=1; mv_zoom_y=1; MvFmtZ(b,sizeof b);  check("Z text x1: blank", b[0]==' ' && b[1]==' '); }
 
   /* ---- 5. Y zoom pixels + clipping ---- */
   zfresh(); volts_per_div=1.0f; ActFreeze();
   for(int i=0;i<N_SAMPLES;i++) osc_v[i]=(i<100)?0.5f:(i<200?-0.5f:0.0f);
   MapToScreen(0); check("Y x1: +0.5 V = 100 px, -0.5 V = 140 px, 0 V = 120", new_y[10]==100 && new_y[150]==140 && new_y[210]==120);
-  mv_axis_x=0; ActZoom(+1); MapToScreen(0); check("Y x2: +0.5 V = 80 px, -0.5 V = 160 px, 0 V stays on the centre", new_y[10]==80 && new_y[150]==160 && new_y[210]==120);
-  ActZoom(+1); MapToScreen(0); check("Y x4: +-0.5 V = +-80 px (40 / 200)", new_y[10]==40 && new_y[150]==200);
-  ActZoom(+1); MapToScreen(0); check("Y x8: clipped to the waveform area top / screen bottom", new_y[10]==WAVEFORM_TOP && new_y[150]==SCREEN_H-1 && new_y[210]==120);
+  for(int i=0;i<N_SAMPLES;i++) raw_samples[i]=(int16_t)((i<120)?(2048+(int)(0.5f/KV+0.5f)):(2048-(int)(0.5f/KV+0.5f))); to_osc_v();   /* v59: time zoom now runs too (needs the stored copy); +-0.5 V halves stay on their side of the centre */
+  ActZoom(+1); MapToScreen(0); { char m[80]; snprintf(m,80,"Y x2 (combined step): +0.5 V = 80 px, -0.5 V = 160 px (got %d, %d)",new_y[20],new_y[220]); check(m, abs(new_y[20]-80)<=1 && abs(new_y[220]-160)<=1); }
+  ActZoom(+1); MapToScreen(0); check("Y x4: +-0.5 V = +-80 px (40 / 200)", abs(new_y[20]-41)<=2 && abs(new_y[220]-199)<=2);
+  ActZoom(+1); MapToScreen(0); check("Y x8: clipped to the waveform area top / screen bottom", new_y[20]==WAVEFORM_TOP && new_y[220]==SCREEN_H-1);
   { int ok=1; for(int i=0;i<N_SAMPLES;i++) if(new_y[i]<WAVEFORM_TOP||new_y[i]>=SCREEN_H) ok=0; check("Y x8: every pixel inside the waveform area", ok); }
-  mv_y_steps=10; ActZoom(-1); ActZoom(-1); MapToScreen(0); check("Y move offset still 1 div (40 px) at x2: 0.5 V -> 80-40 = 40", new_y[10]==40);
+  mv_y_steps=10; ActZoom(-1); ActZoom(-1); MapToScreen(0); check("Y move offset still 1 div (40 px) at x2: 0.5 V -> 80-40 = 40 (+-1 count quantisation)", abs(new_y[20]-41)<=1);
 
   /* ---- 6. FAST time zoom ---- */
   { const float step=8.0f; const uint32_t pre_pts=100, start=800;
@@ -115,6 +136,22 @@ int main(void){
       snprintf(nm,sizeof nm,"zoom back to x1 from the far right: pan re-clamped to the v54 range (%d, nhi %d)",mv_x_pts,mv_nhi); check(nm, mv_zoom_x==1 && mv_x_pts<=mv_nhi && mv_x_pts>=mv_nlo*-1);
       zfresh(); fast_setup(step, pre_pts, start, 0.0); ActFreeze(); mv_axis_x=1; ActZoom(+1); ActDown(1); int q1=mv_x_q; ActZoom(+1); ActDown(1); int q2=mv_x_q-q1;
       snprintf(nm,sizeof nm,"pan step shrinks with the zoom (x2: %d, then x4 step %d, in 1/16 point)",q1,q2); check(nm, q1==48 && q2==24+0*q2 && q2>0); }
+    /* v58: high zoom. pan step must stay > 0 and keep shrinking; the view must not collapse (16/N used to be 0 for N>16) */
+    { int qs[7]; int N; zfresh(); fast_setup(step, pre_pts, start, 0.0); ActFreeze(); mv_axis_x=1;
+      for(N=2; N<=64; N*=2){ ActZoom(+1); int b=mv_x_q; ActDown(1); qs[0]=mv_x_q-b; ActUp(1);
+        snprintf(nm,sizeof nm,"pan step at x%d = %d (1/16 pt), >0 and exactly undone by the opposite key",N,qs[0]); check(nm, qs[0]>0 && mv_x_q==b); }
+      { int q32, q64; zfresh(); fast_setup(step, pre_pts, start, 0.0); ActFreeze(); mv_axis_x=1; for(int i=0;i<5;i++) ActZoom(+1); ActDown(1); q32=mv_x_q; ActZoom(+1); mv_x_q=0; MvSetPanQ(0); ActDown(1); q64=mv_x_q;
+        snprintf(nm,sizeof nm,"pan step x32=%d x64=%d (96/32=3, 96/64 rounded=2)",q32,q64); check(nm, q32==3 && q64==2); }
+      zfresh(); fast_setup(step, pre_pts, start, 0.0); ActFreeze(); mv_axis_x=1; for(int i=0;i<6;i++) ActZoom(+1);
+      { float mn=1e9f,mx=-1e9f; int distinct=0; for(int i=0;i<N_SAMPLES;i++){ if(mv_view_v[i]<mn)mn=mv_view_v[i]; if(mv_view_v[i]>mx)mx=mv_view_v[i]; if(i&&mv_view_v[i]!=mv_view_v[i-1]) distinct++; }
+        snprintf(nm,sizeof nm,"x64 view not collapsed to one value: span %.4f V, %d changing pixels",mx-mn,distinct); check(nm, mv_zoom_x==64 && distinct>20 && mx-mn>0.01f); }
+      { double p=mv_x_q/16.0; float err=0; for(int i=0;i<N_SAMPLES;i++){ double u=120.0+(i-120.0)/64.0+p; float exp_v=(float)((SINP(start+u*step, step)-2048.0)*KV); float e=fabsf(mv_view_v[i]-exp_v); if(e>err)err=e; }
+        snprintf(nm,sizeof nm,"x64 centred: true wave, max error %.4f V",err); check(nm, err<0.02f); }
+      for(int i=0;i<100000;i++) ActDown(1); { int qmax=mv_x_max*16+(1904-1904/64); check("x64 pan right clamp = nhi*16 + 1874, no overflow", mv_x_q==qmax); }
+      for(int i=0;i<100000;i++) ActUp(1);   { int qmin=mv_x_min*16-(1920-1920/64); check("x64 pan left clamp = nlo*16 - 1890", mv_x_q==qmin); }
+      /* extreme stored data: nlo/nhi 30000 stay far inside int32 */
+      mv_x_min=-30000; mv_x_max=30000; MvSetPanQ(1<<30); check("x64 with +-30000 point range: clamp value sane", mv_x_q==30000*16+(1904-1904/64));
+    }
     /* real raw detail: a period-4 ripple of +-300 counts that the w=8 boxcar removes completely at x1 */
     zfresh(); fast_setup(step, pre_pts, start, 300.0);
     { float d1=maxdiff(osc_v); ActFreeze(); mv_axis_x=1; ActZoom(+1); ActZoom(+1); ActZoom(+1); float d8=maxdiff(mv_view_v);
@@ -207,6 +244,7 @@ r3 = subprocess.run([str(OUT/'poll')], text=True, capture_output=True); print(r3
 
 # ---- contracts on the text of main.c ----------------------------------------------------------------------------------------
 before = ROOT.parent/'builds/v57/main_before.c'
+b58 = ROOT.parent/'builds/v59/main_before.c'   # v59 baseline = v58 source
 bt = before.read_text() if before.exists() else None
 def slow_text(t): return t[t.index('SLOW_BEGIN ='):t.index('SLOW_END =')]
 def block(t, b, e):
@@ -237,6 +275,13 @@ if bt is not None:
             return t[a:q]
         contracts.append(('function unchanged vs v56: ' + name, fn(src) == fn(bt)))
     diff = [l for l in __import__('difflib').unified_diff(bt.splitlines(), src.splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
+    if b58.exists():
+        b8 = b58.read_text()
+        d8 = [l for l in __import__('difflib').unified_diff(b8.splitlines(), src.splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
+        contracts.append(('SLOW block byte-identical to v57 (builds/v58/main_before.c)', slow_text(src) == slow_text(b8)))
+        contracts.append(('v59 diff vs v58 is surgical (<= 60 changed lines): %d' % len(d8), len(d8) <= 60))
+        contracts.append(('v59 shared-step ceilings: step 0..6, X=1<<step (64), Y=1<<min(step,5) (32)', 'OscClampI((int)mv_zoom_step + (dir > 0 ? 1 : -1), 0, 6)' in src and 'zy = 1 << ((st > 5) ? 5 : st)' in src and 'ActZoom' in src))
+        contracts.append(('no 16 / mv_zoom_x integer-division left in zoom build', '(16 / mv_zoom_x)' not in src))
     contracts.append(('whole-file diff budget (<= 260 changed lines): %d' % len(diff), len(diff) <= 260))
     # header: zoomed text only while frozen
     contracts.append(('header uses the effective T/V only when frozen and zoomed', 'if (hold_active && mv_zoom_y > 1) MvFmtV(' in src and 'if (hold_active && mv_zoom_x > 1) MvFmtT(' in src))
