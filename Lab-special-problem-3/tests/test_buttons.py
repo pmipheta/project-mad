@@ -46,7 +46,7 @@ contracts = [
  ("UART 'A' = ActAutoMode, 'a' still generator amplitude", "case 'A': ActAutoMode();" in src and "case 'a': gen_amp" in src),
  ('UART x / 0 / h / z / u / d map to Act*', all(t in src for t in ["case 'x': ActToggleMoveAxis();", "case '0': ActMoveCenter();", "ActFreeze(); break;", "case 'z': case 'Z': ActAuto();", "else ActUp(1);", "case 'd': ActDown(1);"])),
  ('x F A 0 act without Enter', 'strchr("sdhg?zxFA0", c)' in src),
- ('buttons call the same Act*', all(t in src for t in ['ActUp(n)', 'ActDown(n)', 'ActFreeze();', 'ActAuto();', 'ActAutoMode();', 'ActToggleFastSlow();'])),
+ ('buttons call the same Act* (v61: physical +/- = ActIncrease/ActDecrease)', all(t in src for t in ['ActIncrease(n)', 'ActDecrease(n)', 'ActFreeze();', 'ActAuto();', 'ActAutoMode();', 'ActToggleFastSlow();'])),
  ('pin defines kept (TODO pins)', all(t in src for t in ['#define BTN_UP_PIN      GPIO_PIN_0', '#define BTN_DOWN_PIN    GPIO_PIN_1', '#define BTN_HOLD_PIN    GPIO_PIN_2', '#define BTN_SET_PIN     GPIO_PIN_3'])),
  ('old SET behaviour kept on UART s', "case 's': OscSetIndex(osc_sidx + 1); break;" in src),
 ]
@@ -85,7 +85,7 @@ static const char *osc_set_names[] = {"FILTER","TRIG","V/DIV","T/DIV"};
 static const char *osc_hold_names[] = {"C1","C2","V/DIV"};
 static int osc_tdiv_i = 8, osc_vdiv_i = 3, osc_fwin = 5, osc_trig_fall = 0, osc_sidx = 0, osc_c1 = 40, osc_c2 = 160;
 static float volts_per_div = 1.0f;
-static uint8_t hold_active, osc_dirty, osc_auto_stage, osc_auto_tries, osc_frame_valid = 1, new_frame_ready, osc_auto_tb = 1, osc_lock_auto;
+static uint8_t hold_active, osc_dirty, osc_stable = 1, osc_auto_stage, osc_auto_tries, osc_frame_valid = 1, new_frame_ready, osc_auto_tb = 1, osc_lock_auto;
 static volatile uint8_t slow_active, slow_fast_flag;
 static uint8_t adc_fast_content; static uint32_t adc_over_t;
 static float osc_raw_vpp, dbg_auto_fsel, osc_v[N_SAMPLES], osc_offset_ct = 2048.0f;

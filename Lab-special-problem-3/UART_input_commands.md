@@ -335,3 +335,19 @@ Generator ไล่ตามเวลาจริงต่อเนื่อง 
 - FAST: real raw samples of the frozen capture are used (a copy kept for the pan/zoom); below one raw sample per pixel, or without stored samples, points are joined by straight lines. SLOW: the frozen 1 ms history copy, same rule.
 - Header while zoomed: `Z:x4` (both axes equal) or `Z:64/32` (time/volt, only at the top step), and the T / V fields show the effective T/DIV (T/DIV ÷ N) or V/DIV (V/DIV ÷ N); cursor `dt` is divided by the time zoom.
 - Not frozen: `+`/`-` do nothing. Unfreeze (`h`), `0` and AUTO (`z`) reset the zoom to x1. Vpp / F are unchanged (whole frozen capture). `?` prints `Zoom: X xN  Y xN`. Unfreeze, `0` and AUTO reset the shared step to 0.
+
+## v61 — 8 physical buttons (reference; UART users can ignore)
+All active LOW (pull-up, press = connect pin to GND), debounce 200 ms. Every button calls the same Act* function as the UART key shown.
+
+| Pin | Button | Action | UART equivalent |
+|---|---|---|---|
+| PB0 | INCREASE (+) | OscAdjust(+1) on the selected setting; hold-repeat (300 ms, then 60 ms, 3x after 1.5 s) | `u` when not frozen |
+| PB1 | DECREASE (−) | OscAdjust(−1), same hold-repeat | `d` when not frozen |
+| PB2 | AUTO | one-shot auto scale | `z` |
+| PB3 | FAST/SLOW | short: toggle forced FAST↔SLOW; hold ≥ 1 s: automatic again | `F` / `A` |
+| PA3 | V/DIV ↔ T/DIV toggle | toggles the selection between V/DIV and T/DIV; while frozen T/DIV does not exist, so it (re)selects V/DIV | `v` / `t` |
+| PC0 | FILTER ↔ TRIG toggle | toggles the selection between FILTER and TRIG; no-op while frozen (neither exists in the hold menu) | `s` cycling |
+| PC3 | STABLE lock / cursor | short press (release < 1.5 s): toggle stable/lock (AUTO↔ROLL, same as UART bare `m`; picture stops sliding, capture keeps running live, does NOT freeze). Hold ≥ 1.5 s: toggle C1 ↔ C2 cursor selection (only while frozen; otherwise nothing, and the release toggles nothing) | `m` |
+| PF3 | FREEZE | true freeze/unfreeze toggle of `hold_active` on press (`ActFreeze`, the same function as `h`); stops capture so zoom/pan/cursors can be used. Does not touch the stable lock (PC3 short / `m`) | `h` |
+
+Notes: physical + / − **never** move/pan/zoom, even while frozen (they always do OscAdjust); move/zoom/freeze/cursors stay UART-only (`u`/`d`/`+`/`-`/`h`). Select and TRIGGER buttons work frozen or not. PC13 blue button keeps its FAST/SLOW behaviour.

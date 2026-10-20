@@ -72,6 +72,16 @@
 #define BTN_HOLD_PIN    GPIO_PIN_2    /* TODO: set to actual pin */
 #define BTN_SET_PORT    GPIOB
 #define BTN_SET_PIN     GPIO_PIN_3    /* TODO: set to actual pin */
+/* v61 eight-button panel. Pin -> role: PB0 = INCREASE(+), PB1 = DECREASE(-), PB2 = AUTO, PB3 = FAST/SLOW (short) / auto FAST/SLOW (long),
+ * v62 revised: PA3 = V/DIV<->T/DIV select toggle, PC0 = FILTER<->TRIG select toggle, PC3 = short FREEZE / long(1500ms) C1<->C2, PF3 = FREEZE toggle (duplicate). All active LOW, pull-up. */
+#define BTN_VDIV_PORT   GPIOA
+#define BTN_VDIV_PIN    GPIO_PIN_3
+#define BTN_TDIV_PORT   GPIOC
+#define BTN_TDIV_PIN    GPIO_PIN_0
+#define BTN_FILT_PORT   GPIOC
+#define BTN_FILT_PIN    GPIO_PIN_3
+#define BTN_TRIG_PORT   GPIOF
+#define BTN_TRIG_PIN    GPIO_PIN_3
 
 /* --- Screen geometry ------------------------------------------------------- */
 #define HEADER_H        29           /* top panel height (px)                  */
@@ -102,10 +112,12 @@
 #define FAST_O2         __attribute__((optimize("O2")))
 #define FRAME_MS        33           /* ~30 FPS                                 */
 #define HEADER_MS       300          /* header refresh interval (ms)            */
+#define BLINK_PERIOD_MS 300u         /* v60: SET-selection blink, ms per ON or OFF phase (full cycle 600 ms ~1.7 Hz). Kept = HEADER_MS because the header is only redrawn every HEADER_MS, so each redraw lands in the opposite phase */
 #define BTN_MAN_PORT    User_Blue_GPIO_Port   /* PC13 = Nucleo user button (blue) */
 #define BTN_MAN_PIN     User_Blue_Pin
 #define BTN_MAN_ACTIVE_HIGH 1                 /* Nucleo B1: pressed = 1 */
 #define BTN_MAN_LONG_MS 1000                  /* hold this long = back to AUTO */
+#define BTN_CURSOR_LONG_MS 1500               /* v62: PC3 held this long = toggle C1/C2 cursor */
 #define BTN_DEBOUNCE_MS 200          /* button debounce window                  */
 #define BTN_LONG_MS     2000         /* (v53 long-press threshold, no longer used: AUTO is a short press) */
 #define BTN_REPEAT_FIRST_MS 300u     /* v54: UP/DOWN held: first step at once, repeat after this ...      */
@@ -178,6 +190,7 @@ static uint16_t cursor_x = SCREEN_W / 2;  /* vertical cursor at screen centre  *
 
 /* --- Buttons --------------------------------------------------------------- */
 static Button btn_up, btn_down, btn_hold, btn_set;
+static Button btn_vdiv, btn_tdiv, btn_filt, btn_trig;   /* v61 */
 
 /* --- Mock sine phase (remove after merge) ---------------------------------- */
 static float mock_phase = 0.0f;
@@ -1037,6 +1050,12 @@ static void MvMove(int dir, int n)           /* dir +1 = UP / LEFT, -1 = DOWN / 
     osc_dirty = 1;
 }
 
+static void ActToggleStable(void)            /* v63: PC3 short / PF3 = same as UART 'm' bare toggle */
+{
+    osc_stable = (uint8_t)!osc_stable;
+    osc_dirty  = 1;
+}
+
 static void ActFreeze(void)                  /* FREEZE button / 'h' */
 {
     hold_active = !hold_active;
@@ -1063,6 +1082,41 @@ static void ActDown(int n)                   /* DOWN/RIGHT button / 'd' */
 {
     MvSync();
     if (hold_active) MvMove(-1, n); else OscAdjust(-1);
+}
+
+/* v61 physical + / - buttons: ALWAYS OscAdjust (setting adjust), never MvMove/zoom, even while frozen.
+ * Move/zoom/freeze stay UART-only (8-button design); UART 'u'/'d' still use ActUp/ActDown which branch on hold_active. */
+static void ActIncrease(int n)
+{
+    (void)n;
+    MvSync();
+    OscAdjust(+1);
+}
+
+static void ActDecrease(int n)
+{
+    (void)n;
+    MvSync();
+    OscAdjust(-1);
+}
+
+/* v61/v62: select a setting by name in the CURRENTLY ACTIVE name array (osc_hold_names while frozen, osc_set_names otherwise).
+ * Name not in the active array = silent no-op (osc_sidx untouched). */
+static void ActSelectSetting(const char *name)
+{
+    const char * const *names = hold_active ? osc_hold_names : osc_set_names;
+    int n = OscSetCount();
+    int i;
+    for (i = 0; i < n; i++) {
+        if (!strcmp(names[i], name)) { OscSetIndex(i); return; }
+    }
+}
+
+/* v61 TRIGGER button: flip the edge directly, no need to select TRIG first. Works frozen or not. */
+static void ActToggleTrigEdge(void)
+{
+    osc_trig_fall = !osc_trig_fall;
+    osc_dirty = 1;
 }
 
 static void ActToggleMoveAxis(void)          /* 'x' */
@@ -1785,24 +1839,27 @@ static void DrawTopPanel(void)
     /* ตัวที่กำลังปรับ (SET) ถูกไฮไลต์ => มองจอรู้เลยว่า UP/DOWN จะแก้ค่าอะไร
      * ไม่ต้องไปดูที่หน้าจอ serial เท่านั้น                                        */
     const char *selname = OscSetName();
+    uint8_t blink_on = (uint8_t)((HAL_GetTick() / (BLINK_PERIOD_MS)) & 1u);   /* v60: one shared flag => all selected fields blink in sync */
     int sel_vdiv = (strcmp(selname, "V/DIV") == 0);
     int sel_tdiv = (strcmp(selname, "T/DIV") == 0);
 
     /* V/div — x=2 (MAGENTA = กำลังปรับตัวนี้อยู่) */
     if (hold_active && mv_zoom_y > 1) MvFmtV(buf, sizeof(buf), volts_per_div / (float)mv_zoom_y);   /* v57: effective V/DIV while zoomed */
     else snprintf(buf, sizeof(buf), "V:%.1fV/d", (double)volts_per_div);
-    HDRT(buf, 2, 1, sel_vdiv ? MAGENTA : YELLOW, 1, BLACK);
+    HDRT(buf, 2, 1, sel_vdiv ? (blink_on ? MAGENTA : YELLOW) : YELLOW, 1, BLACK);
 
     /* T/div label — x=72 */
     if (hold_active && mv_zoom_x > 1) MvFmtT(buf, sizeof(buf), osc_capture_tdiv / (float)mv_zoom_x);   /* v57: effective T/DIV while zoomed */
     else if (osc_capture_tdiv < 0.1f) snprintf(buf, sizeof(buf), "T:%.0fus/d ", (double)(osc_capture_tdiv * 1000.0f));   /* 5/10/15/20/50 us */
     else                         snprintf(buf, sizeof(buf), "T:%.1fms/d", (double)osc_capture_tdiv);
-    HDRT(buf, 72, 1, sel_tdiv ? MAGENTA : WHITE, 1, BLACK);
+    HDRT(buf, 72, 1, sel_tdiv ? (blink_on ? MAGENTA : WHITE) : WHITE, 1, BLACK);
 
     /* Setting ที่กำลังปรับ (SET เลือก, UP/DOWN เปลี่ยนค่า) — x=150
      * ตัวดำบนแถบส้ม = "ช่องที่ถูกเลือกอยู่" */
     OscSetValueText(buf, sizeof(buf));
-    HDRT(buf, 150, 1, BLACK, 1, ORANGE);
+    /* v60: blinks by inverting fg/bg (never black-on-black, text always readable) */
+    if (blink_on) HDRT(buf, 150, 1, BLACK, 1, ORANGE);
+    else          HDRT(buf, 150, 1, ORANGE, 1, BLACK);
     snprintf((char *)dbg_lcd_set, sizeof(dbg_lcd_set), "%s", buf);
 
     /* Run / Hold status — x=226 */
@@ -1979,14 +2036,46 @@ static void HandleButtons(uint32_t now)
     int n;
     MvSync();
 
-    if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) ActUp(n);
-    if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) ActDown(n);
+    /* v61: PB0 = INCREASE, PB1 = DECREASE (hold-repeat as before; OscAdjust only, never move/zoom) */
+    if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) ActIncrease(n);
+    if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) ActDecrease(n);
 
-    if (ButtonJustPressed(&btn_hold, now)) ActFreeze();
-
-    /* SET pin is the AUTO button now (v53: short = next setting, long = auto scale). The old SET job stays on UART 's'. */
-    if (ButtonJustPressed(&btn_set, now)) ActAuto();
+    /* PB2 = AUTO (one-shot auto scale) */
+    if (ButtonJustPressed(&btn_hold, now)) ActAuto();
     (void)ButtonLongPress;
+
+    /* v62: PA3 = toggle V/DIV <-> T/DIV select; PC0 = toggle FILTER <-> TRIG select (no-op where the target does not exist, e.g. frozen) */
+    if (ButtonJustPressed(&btn_vdiv, now)) ActSelectSetting(strcmp(OscSetName(), "V/DIV") == 0 ? "T/DIV" : "V/DIV");
+    if (ButtonJustPressed(&btn_tdiv, now)) ActSelectSetting(strcmp(OscSetName(), "FILTER") == 0 ? "TRIG" : "FILTER");
+    (void)ActToggleTrigEdge;
+
+    /* v64: PF3 = true FREEZE toggle (ActFreeze, same as UART 'h') */
+    if (ButtonJustPressed(&btn_trig, now)) ActFreeze();
+
+    /* v62: PC3 = short (on release) FREEZE | held BTN_CURSOR_LONG_MS (fires once) toggle C1<->C2 cursor (only while frozen). Same pattern as PB3 below. */
+    {
+        static uint8_t  cu_prev = 0, cu_long = 0;
+        static uint32_t cu_t0 = 0;
+        uint8_t pressed = ButtonRaw(&btn_filt);
+        if (pressed && !cu_prev) { cu_t0 = now; cu_long = 0; }
+        if (pressed && !cu_long && (now - cu_t0) >= BTN_CURSOR_LONG_MS) {
+            cu_long = 1;
+            if (hold_active) ActSelectSetting(strcmp(OscSetName(), "C1") == 0 ? "C2" : "C1");
+        }
+        if (!pressed && cu_prev && !cu_long && (now - cu_t0) >= 40u) ActToggleStable();
+        cu_prev = pressed;
+    }
+
+    /* PB3 = FAST/SLOW: short = toggle (on release), held BTN_MAN_LONG_MS = back to automatic. Same pattern as PC13 below. */
+    {
+        static uint8_t  fs_prev = 0, fs_long = 0;
+        static uint32_t fs_t0 = 0;
+        uint8_t pressed = ButtonRaw(&btn_set);
+        if (pressed && !fs_prev) { fs_t0 = now; fs_long = 0; }
+        if (pressed && !fs_long && (now - fs_t0) >= BTN_MAN_LONG_MS) { fs_long = 1; ActAutoMode(); }
+        if (!pressed && fs_prev && !fs_long && (now - fs_t0) >= 40u) ActToggleFastSlow();
+        fs_prev = pressed;
+    }
 
     /* PC13: manual FAST/SLOW. Acts on release (short) or after 1 s held (back to AUTO). */
     {
@@ -3358,6 +3447,11 @@ int main(void)
         btn_init.Mode = GPIO_MODE_INPUT;
         btn_init.Pull = GPIO_PULLUP;
         HAL_GPIO_Init(GPIOB, &btn_init);
+        /* v61: four more buttons, same manual init (PA3, PC0, PC3, PF3) */
+        __HAL_RCC_GPIOA_CLK_ENABLE(); __HAL_RCC_GPIOC_CLK_ENABLE(); __HAL_RCC_GPIOF_CLK_ENABLE();
+        btn_init.Pin = BTN_VDIV_PIN;                  HAL_GPIO_Init(BTN_VDIV_PORT, &btn_init);
+        btn_init.Pin = BTN_TDIV_PIN | BTN_FILT_PIN;   HAL_GPIO_Init(GPIOC, &btn_init);
+        btn_init.Pin = BTN_TRIG_PIN;                  HAL_GPIO_Init(BTN_TRIG_PORT, &btn_init);
     }
 
     /* Button struct init (done here to avoid static-initializer cast issue) */
@@ -3365,6 +3459,10 @@ int main(void)
     btn_down = (Button){BTN_DOWN_PORT, BTN_DOWN_PIN, 0, 0, 0, 0};
     btn_hold = (Button){BTN_HOLD_PORT, BTN_HOLD_PIN, 0, 0, 0, 0};
     btn_set  = (Button){BTN_SET_PORT,  BTN_SET_PIN,  0, 0, 0, 0};
+    btn_vdiv = (Button){BTN_VDIV_PORT, BTN_VDIV_PIN, 0, 0, 0, 0};
+    btn_tdiv = (Button){BTN_TDIV_PORT, BTN_TDIV_PIN, 0, 0, 0, 0};
+    btn_filt = (Button){BTN_FILT_PORT, BTN_FILT_PIN, 0, 0, 0, 0};
+    btn_trig = (Button){BTN_TRIG_PORT, BTN_TRIG_PIN, 0, 0, 0, 0};
 
     /* LCD init */
     UartInputInit();          /* เริ่มรับคำสั่งจาก USART3 (Virtual COM) */
