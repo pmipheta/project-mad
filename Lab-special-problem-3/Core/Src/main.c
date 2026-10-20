@@ -89,6 +89,10 @@
 #define ADC_MID         2048         /* 12-bit midpoint (= 0 V after bias)     */
 #define ADC_FULL        4095         /* 12-bit full scale                       */
 #define ADC_VREF        3.3f         /* reference voltage (V)                   */
+#define ADC_INPUT_FC    0.60e6f      /* v53: input roll-off corner (Hz); fit to 1-2.17 MHz board readings vs 1 kHz (+-3 %) */
+#define ADC_INPUT_N     1.7f         /* v53: roll-off steepness (1.0 would be a plain RC)                              */
+#define ADC_INPUT_GAIN  1.0f         /* v55: no low-frequency gain error (1.00 Vpp set -> raw 1.00 V); v53 value 1.111 was wrong */
+#define ADC_INPUT_GMAX  3.5f         /* never scale more than 3.5x (noise)      */
 
 /* --- Sample buffer --------------------------------------------------------- */
 #define N_SAMPLES       240
@@ -103,7 +107,12 @@
 #define BTN_MAN_ACTIVE_HIGH 1                 /* Nucleo B1: pressed = 1 */
 #define BTN_MAN_LONG_MS 1000                  /* hold this long = back to AUTO */
 #define BTN_DEBOUNCE_MS 200          /* button debounce window                  */
-#define BTN_LONG_MS     2000         /* long-press threshold for auto scale     */
+#define BTN_LONG_MS     2000         /* (v53 long-press threshold, no longer used: AUTO is a short press) */
+#define BTN_REPEAT_FIRST_MS 300u     /* v54: UP/DOWN held: first step at once, repeat after this ...      */
+#define BTN_REPEAT_MS       60u      /*      ... every 60 ms                                            */
+#define BTN_ACCEL_MS        1500u    /*      ... and after this long ...                                */
+#define BTN_ACCEL_STEPS     3        /*      ... 3 steps per repeat                                      */
+#define BTN_REL_MS          30u      /* v54: a release must read stable this long (contact bounce)      */
 
 /* --- Debug: แสดง FPS จริงบนจอ (1 = เปิด, 0 = ปิด) --- */
 #define SHOW_FPS        1
@@ -133,6 +142,9 @@ typedef struct {
     uint32_t      held_since_tick;  /* tick of when held press began           */
     uint8_t       is_held;          /* 1 = currently held down                 */
     uint8_t       long_fired;       /* 1 = long-press action already triggered */
+    uint32_t      next_rep_tick;    /* v54: next auto-repeat of a held UP/DOWN  */
+    uint32_t      low_tick;         /* v54: tick when the pin first read released (release debounce) */
+    uint8_t       low_pending;      /* v54: 1 = pin reads released, waiting BTN_REL_MS to be sure */
 } Button;
 
 /* USER CODE END PTD */
@@ -206,6 +218,9 @@ static void     UartInputInit(void);
 static void     UartPoll(void);
 static void     UartPanel(void);
 static void     OscAdjust(int dir);
+static void     MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n);   /* v54: MOVE data block */
+static void     MvFreezeCapture(void);
+static void     MvBuildView(void);
 static void     DrawCursors(void);
 static int      OscCursorX(int idx);
 static void     ClearCursors(void);
@@ -247,7 +262,7 @@ volatile uint32_t prof_us[8];   /* PROFILING (us): 0 capture, 1 process+measure+
  * ========================================================================== */
 #define OSC_H_DIVS      10          /* จำนวนช่องแนวนอน (เหมือน simulator)      */
 #define SIM_STREAM_MODE  2          /* 2 = function generator (ตาม simulator) | 1 = stream | 0 = sine เดิม */
-#define OSC_V_FILL_DIVS 5.2f        /* auto scale: ให้ Vpp กินกี่ช่องแนวตั้ง (grid มี 5 ช่อง, เผื่อเกินนิดหน่อย) */
+#define OSC_V_FILL_DIVS 4.0f        /* v54 auto scale: Vpp may span at most this many divisions (the visible area is ~5.3 div: 2.2 above, 3 below the centre) */
 #define OSC_FIT_CYCLES  2.5f        /* auto scale: อยากเห็นกี่คาบบนจอ (10 ช่อง) */
 #define OSC_SET_COUNT   4           /* FILTER / TRIG / V/DIV / T/DIV            */
 #define OSC_HOLD_COUNT  3           /* C1 / C2 / V/DIV (ตอน HOLD)               */
@@ -324,6 +339,15 @@ static uint32_t adc_probe_t = 0;       /* tick of the last alias probe (at most 
 static float    adc_rough_ratio = 0.0f; /* mean |sample-to-sample change| / Vpp of the last measurement capture */
 static uint32_t adc_over_t = 0;        /* tick of the last 'above readout limit' frame (display keeps >2.1MHz for 1.5 s: no blinking) */
 static int      osc_plot_offset = 0;
+
+/* --- v54: MOVE (only acts while frozen). All zero = identical to v53. --- */
+static int      mv_y_steps  = 0;        /* vertical offset, 0.1 div per step, +-40 (display only) */
+static int      mv_x_pts    = 0;        /* horizontal pan of the frozen capture in display points (<0 = earlier in time) */
+static int      mv_x_min    = 0, mv_x_max = 0;   /* pan range that the frozen capture really holds (set at freeze) */
+static uint8_t  mv_axis_x   = 0;        /* 0 = MOVE:Y, 1 = MOVE:X */
+static uint8_t  mv_prev_hold = 0;       /* freeze edge detector */
+static uint8_t  mv_view_on  = 0;        /* 1 = the panned view mv_view_v is drawn instead of osc_v */
+static float    mv_view_v[N_SAMPLES];
 
 /* --- UART RX ring buffer --- */
 static volatile uint8_t  uart_rx[UART_RX_SIZE];
@@ -514,6 +538,25 @@ static void OscMeasureFrame(void)
 #if ADC_INPUT_ENABLE
     osc_meas.freq = osc_frame_valid ? osc_raw_freq : 0.0f;
 #endif
+#if ADC_INPUT_ENABLE
+    /* v52: analog input bandwidth compensation.  The ADC input (source resistance + sample-and-hold capacitor) acts as
+     * a one-pole low-pass at about ADC_INPUT_FC: measured on the board, 2.1 MHz read 0.87 V for a ~1.93 V signal.
+     * The raw samples are already that small, so the software cannot "see" more; instead the DISPLAYED numbers are
+     * scaled back by the known filter gain at the measured frequency.  Below ~100 kHz the factor is < 1.005 (no change);
+     * SLOW mode frequencies (< 100 Hz) give exactly 1.  Only osc_meas (screen/UART) is scaled - the raw values used by
+     * auto time base, hold and trigger logic are untouched. */
+    {
+        float g = 1.0f;
+        if (osc_meas.freq > 0.0f) {
+            float r = osc_meas.freq / ADC_INPUT_FC;
+            g = sqrtf(1.0f + expf(ADC_INPUT_N * logf(r)));
+            if (g > ADC_INPUT_GMAX) g = ADC_INPUT_GMAX;
+        }
+        g *= ADC_INPUT_GAIN;                         /* front-end gain applies at every frequency */
+        osc_meas.vmax *= g; osc_meas.vmin *= g; osc_meas.vpp *= g; osc_meas.vrms *= g;
+        peak *= g;
+    }
+#endif
     if (peak < 0.001f) {
         strcpy(osc_det, "---");
     } else {
@@ -664,42 +707,6 @@ static void OscAutoScale(void)
     osc_dirty = 1;
     UartPrint("\r\n AutoScale...\r\n");
 }
-
-static void OscAutoScaleStep(void)
-{
-    if (!osc_auto_stage || hold_active || !osc_frame_valid || !new_frame_ready) return;
-    float f = osc_meas.freq;
-    if (!(f > 0.0f)) {       /* adaptive measurement still acquiring periods */
-        /* FAST capture only sees >= 40 Hz: after ~15 frames look at the SLOW 200 ms/div window (2 s);
-         * give up (no periodic signal) after the SLOW window had time to fill. */
-        if (osc_auto_tries < 250u) osc_auto_tries++;
-        if (!slow_active && osc_auto_tries == 15u) { osc_tdiv_i = OSC_NT_FAST + 4; osc_dirty = 1; }
-        else if (slow_active && osc_auto_tries > 100u) { osc_auto_stage = 0; }
-        return;
-    }
-    float vpp = ADC_INPUT_ENABLE ? osc_raw_vpp : osc_meas.vpp;
-    int vi = (int)(sizeof(osc_vdivs) / sizeof(osc_vdivs[0])) - 1;
-    for (int i = 0; i <= vi; i++) {
-        if (osc_vdivs[i] * OSC_V_FILL_DIVS >= vpp) { vi = i; break; }
-    }
-    int ti = 0;
-    float best = 1.0e30f;
-    int k0 = 0, k1 = OSC_NT_FAST;                         /* >= 45 Hz: FAST bases (as before) */
-    if (f < 45.0f) { k0 = OSC_NT_FAST; k1 = OSC_NT; ti = OSC_NT_FAST + 4; }   /* slow signal: SLOW bases */
-    for (int i = k0; i < k1; i++) {
-        float cyc = f * osc_tdivs_ms[i] * OSC_H_DIVS / 1000.0f;
-        float d = fabsf(cyc - OSC_FIT_CYCLES);
-        if (k0 && cyc < 2.0f) d += 10.0f;                 /* SLOW: need >= 2 periods to measure */
-        if (d < best) { best = d; ti = i; }
-    }
-    osc_vdiv_i = vi;
-    volts_per_div = osc_vdivs[vi];
-    osc_tdiv_i = ti; /* captured time metadata changes only on acquisition */
-    dbg_auto_fsel = f;
-    osc_auto_stage = 0;
-    osc_dirty = 1;
-}
-
 
 static float SlowProbeFreq(int ti);          /* defined in the SLOW block */
 static uint8_t SlowSlowish(void);            /* defined in the SLOW block: 1 = the newest history is a clearly moving, clearly slow signal */
@@ -928,6 +935,145 @@ static void OscAutoRearm(void)
 }
 /* AUTO_TB_END ============================================================== */
 
+/* MOVE_BEGIN ================================================================
+ * v54: the four button roles (FREEZE, AUTO, UP/LEFT, DOWN/RIGHT) and the extra keys. One Act*() per role; UART keys and buttons call the same function.
+ *   MOVE acts ONLY while frozen (hold_active). Not frozen: UP/DOWN keep their v53 job (adjust the setting chosen with 's').
+ *   Y move: vertical offset added at draw time (0.1 div per step, +-4 div).  X move: pan of the frozen capture (1/40 screen per step) inside the data that was captured.
+ *   Numbers (Vpp / F) are never touched by moving. Unfreeze, AUTO and '0' reset both offsets.
+ *   F = force FAST<->SLOW (turns the auto time base off, = the PC13 short press), A = automatic switching again (= the PC13 long press).
+ * ========================================================================== */
+#define MV_Y_MAX_STEPS   40                  /* +-4 div */
+#define MV_X_STEP_PTS    (N_SAMPLES / 40)    /* 1/40 screen = 6 display points */
+#define AS_MIN_VPP       0.05f               /* below this Vpp there is no signal */
+#define AS_MIN_CYC       3.2f                /* FAST: fewest cycles on screen that the auto time base (switches below 3.0) leaves alone */
+
+static float MvShownV(int idx)               /* the voltage of display point idx as drawn (panned view while X-moved) */
+{
+    return (mv_view_on ? mv_view_v : osc_v)[((idx % N_SAMPLES) + N_SAMPLES) % N_SAMPLES];
+}
+
+static void MvReset(void)                    /* offsets back to zero: the picture is the captured one again */
+{
+    mv_y_steps = 0; mv_x_pts = 0; mv_view_on = 0;
+    osc_dirty = 1;
+}
+
+static void MvSync(void)                     /* freeze / unfreeze edge: called from every Act*() and once per main-loop pass */
+{
+    if (hold_active && !mv_prev_hold)      { mv_y_steps = 0; mv_x_pts = 0; mv_view_on = 0; MvFreezeCapture(); }
+    else if (!hold_active && mv_prev_hold) { MvReset(); mv_x_min = mv_x_max = 0; }
+    mv_prev_hold = hold_active;
+}
+
+static void MvMove(int dir, int n)           /* dir +1 = UP / LEFT, -1 = DOWN / RIGHT; only called while frozen */
+{
+    if (n < 1) n = 1;
+    if (!mv_axis_x) {
+        mv_y_steps = OscClampI(mv_y_steps + dir * n, -MV_Y_MAX_STEPS, MV_Y_MAX_STEPS);
+    } else {
+        int p = OscClampI(mv_x_pts - dir * n * MV_X_STEP_PTS, mv_x_min, mv_x_max);
+        if (p != mv_x_pts) { mv_x_pts = p; MvBuildView(); }
+    }
+    osc_dirty = 1;
+}
+
+static void ActFreeze(void)                  /* FREEZE button / 'h' */
+{
+    hold_active = !hold_active;
+    osc_sidx    = 0;
+    osc_dirty   = 1;
+    MvSync();
+}
+
+static void ActAuto(void)                    /* AUTO button / 'z': unfreeze, offsets to zero, auto scale */
+{
+    if (hold_active) { hold_active = 0; osc_sidx = 0; }
+    MvSync();
+    MvReset();
+    AutoScale();                             /* = OscAutoScale() */
+}
+
+static void ActUp(int n)                     /* UP/LEFT button / 'u' (n = steps, >1 only for a long hold) */
+{
+    MvSync();
+    if (hold_active) MvMove(+1, n); else OscAdjust(+1);
+}
+
+static void ActDown(int n)                   /* DOWN/RIGHT button / 'd' */
+{
+    MvSync();
+    if (hold_active) MvMove(-1, n); else OscAdjust(-1);
+}
+
+static void ActToggleMoveAxis(void)          /* 'x' */
+{
+    mv_axis_x = (uint8_t)!mv_axis_x;
+    osc_dirty = 1;
+}
+
+static void ActMoveCenter(void)              /* '0' */
+{
+    MvSync();
+    MvReset();
+}
+
+static void ActToggleFastSlow(void)          /* 'F' / PC13 short: force FAST <-> SLOW (opposite of the current one); auto time base off. Ignored while frozen. */
+{
+    if (hold_active) return;
+    OscManualToggle();
+}
+
+static void ActAutoMode(void)                /* 'A' / PC13 long: automatic FAST/SLOW switching again */
+{
+    OscAutoRearm();
+}
+
+/* AUTO scale, real-scope style.
+ * V/DIV : the smallest step that keeps Vpp within OSC_V_FILL_DIVS divisions (the screen shows ~5.3 divisions).
+ * T/DIV : chosen with the SAME rules as the auto time base (AtbPickSlow below ATB_FAST_TO_SLOW_HZ, FAST with >= AS_MIN_CYC cycles),
+ *         so the auto time base agrees with it and does not move it a moment later.
+ * No signal (Vpp < AS_MIN_VPP): 1 V/div and the default FAST time base. */
+static int OscAutoPickTdiv(float f)
+{
+    int want_slow = slow_active ? (f <= ATB_SLOW_TO_FAST_HZ) : (f < ATB_FAST_TO_SLOW_HZ);
+    if (want_slow) return AtbPickSlow(f);
+    for (int k = 0; k < OSC_NT_FAST; k++)
+        if (f * osc_tdivs_ms[k] * (float)OSC_H_DIVS / 1000.0f >= AS_MIN_CYC) return k;
+    return OSC_NT_FAST - 1;
+}
+
+static void OscAutoApply(float vpp, int ti)
+{
+    int vi = 3;                                           /* default 1 V/div */
+    if (vpp >= AS_MIN_VPP) {
+        vi = (int)(sizeof(osc_vdivs) / sizeof(osc_vdivs[0])) - 1;
+        for (int i = 0; i <= vi; i++) { if (osc_vdivs[i] * OSC_V_FILL_DIVS >= vpp) { vi = i; break; } }
+    }
+    osc_vdiv_i = vi;
+    volts_per_div = osc_vdivs[vi];
+    osc_tdiv_i = ti; /* captured time metadata changes only on acquisition */
+    osc_auto_stage = 0;
+    osc_dirty = 1;
+}
+
+static void OscAutoScaleStep(void)
+{
+    if (!osc_auto_stage || hold_active || !osc_frame_valid || !new_frame_ready) return;
+    float f = osc_meas.freq;
+    float vpp = ADC_INPUT_ENABLE ? osc_raw_vpp : osc_meas.vpp;
+    if (f > 0.0f) {
+        dbg_auto_fsel = f;
+        OscAutoApply(vpp, OscAutoPickTdiv(f));
+        return;
+    }
+    /* no periodic reading (yet) */
+    if (osc_auto_tries < 250u) osc_auto_tries++;
+    if (slow_active && vpp < AS_MIN_VPP) { OscAutoApply(0.0f, OSC_TDIV_DEF); return; }    /* the SLOW window is flat: no signal */
+    if (!slow_active && osc_auto_tries == 15u) { osc_tdiv_i = OSC_NT_FAST + 4; osc_dirty = 1; }   /* FAST sees only >= 40 Hz: look at the SLOW 200 ms/div window (2 s) */
+    else if (slow_active && osc_auto_tries > 100u) OscAutoApply(vpp, OSC_TDIV_DEF);        /* not periodic: scale V/DIV, default FAST time base */
+}
+/* MOVE_END ================================================================= */
+
 static void UartPanel(void)
 {
     char b[96];
@@ -947,6 +1093,9 @@ static void UartPanel(void)
              osc_stable ? "AUTO" : "ROLL", osc_trig_fall ? "FALL" : "RISE", osc_det);
     UartPrint(b);
     UartPrint(osc_auto_tb ? "\r\n TimeBase: AUTO (change T/DIV = manual, z = AUTO again)" : "\r\n TimeBase: MANUAL (z = AUTO)");
+    snprintf(b, sizeof(b), "\r\n Mode:%s%s  MOVE:%c (frozen only)  offY:%d (0.1 div)  offX:%d pts",
+             slow_active ? "SLOW" : "FAST", osc_auto_tb ? "" : "*", mv_axis_x ? 'X' : 'Y', mv_y_steps, mv_x_pts);
+    UartPrint(b);
 
     UartPrint("\r\n== FUNCTION GENERATOR (input) ================");
     snprintf(b, sizeof(b), "\r\n Wave:%s  Freq:%d Hz",
@@ -969,8 +1118,8 @@ static void UartPanel(void)
     snprintf(b, sizeof(b), "   Freq: %d Hz", (int)(osc_meas.freq + 0.5f));   /* p44: ปัด */
     UartPrint(b);
     if (hold_active) {
-        UartNum("\r\n U1:", osc_v[(osc_c1 + osc_plot_offset) % N_SAMPLES], " V");  UartNum("   U2:", osc_v[(osc_c2 + osc_plot_offset) % N_SAMPLES], " V");
-        UartNum("   dV:", osc_v[(osc_c2 + osc_plot_offset) % N_SAMPLES] - osc_v[(osc_c1 + osc_plot_offset) % N_SAMPLES], " V");
+        UartNum("\r\n U1:", MvShownV(osc_c1 + osc_plot_offset), " V");  UartNum("   U2:", MvShownV(osc_c2 + osc_plot_offset), " V");
+        UartNum("   dV:", MvShownV(osc_c2 + osc_plot_offset) - MvShownV(osc_c1 + osc_plot_offset), " V");
         snprintf(b, sizeof(b), "   dt: %d us",
                  (int)(((float)(osc_c2 - osc_c1) / osc_fs_eff) * 1e6f));
         UartPrint(b);
@@ -979,6 +1128,7 @@ static void UartPanel(void)
     UartNum("   Dev:", osc_offset_ct - (float)ADC_MID, " cts");
     UartPrint("\r\n----------------------------------------------");
     UartPrint("\r\n keys: s=SET u=UP d=DOWN h=HOLD g=gen m=auto/roll z=autoscale ?=status");
+    UartPrint("\r\n v54:  h=freeze z=auto u/d=up/left,down/right (frozen=move) x=MOVE:Y/X 0=recenter F=FAST<>SLOW(forced*) A=auto FAST/SLOW");
     UartPrint("\r\n ctrl: m a=auto(นิ่ง) m r=roll(ไถล) | พิมพ์คีย์เดี่ยวได้เลยไม่ต้อง Enter");
     UartPrint("\r\n  w=wave f<Hz> a<V> o<Vdc> n<Vnoise> v[+|-] t[+|-] c1<n> c2<n> cal<0|1>");
     UartPrint("\r\n> ");
@@ -1002,13 +1152,13 @@ static void UartCommand(char *line)
 
     switch (tok[0]) {
         case 's': OscSetIndex(osc_sidx + 1); break;                     /* SET   */
-        case 'u': if (has) OscSetIndex(atoi(arg)); else OscAdjust(+1); break;
-        case 'd': OscAdjust(-1); break;                                 /* DOWN  */
-        case 'h': case 'r':                                             /* HOLD  */
-            hold_active = !hold_active;
-            osc_sidx    = 0;
-            osc_dirty   = 1;
-            break;
+        case 'u': if (has) OscSetIndex(atoi(arg)); else ActUp(1); break;   /* UP    (frozen: move up/left) */
+        case 'd': ActDown(1); break;                                    /* DOWN  (frozen: move down/right) */
+        case 'h': case 'r': ActFreeze(); break;                         /* HOLD  */
+        case 'x': ActToggleMoveAxis(); break;                           /* MOVE:Y <-> MOVE:X */
+        case '0': ActMoveCenter(); break;                               /* re-centre */
+        case 'F': ActToggleFastSlow(); break;                           /* force FAST <-> SLOW (upper case: 'f' is the generator frequency) */
+        case 'A': ActAutoMode(); break;                                 /* automatic FAST/SLOW again (upper case: 'a' is the generator amplitude) */
         case 'g':                                                       /* gen ใหม่ */
             gen_ph = fmodf(gen_ph + 1.7f, 6.28318531f);                  /* = reseed */
             osc_dirty = 1;
@@ -1061,7 +1211,7 @@ static void UartCommand(char *line)
             osc_dirty = 1;
             break;
         }
-        case 'z': case 'Z': OscAutoScale(); break;                      /* auto scale */
+        case 'z': case 'Z': ActAuto(); break;                            /* auto scale */
         case '?': default: break;
     }
     UartPanel();
@@ -1078,7 +1228,7 @@ static void UartPoll(void)
             continue;
         }
         /* ทำทันทีเฉพาะคีย์ที่ไม่มีรูปแบบ "มีค่า" เท่านั้น (s/u/d/h/g/m ต้องรอ idle) */
-        if (uart_len == 0 && strchr("sdhg?z", c)) {
+        if (uart_len == 0 && strchr("sdhg?zxFA0", c)) {
             uart_line[0] = c; uart_line[1] = 0;
             UartCommand(uart_line);
             continue;
@@ -1271,13 +1421,14 @@ static int FindTrigger(void)
 static void MapToScreen(int trig_offset)
 {
     osc_plot_offset = trig_offset;
+    const float *vs = mv_view_on ? mv_view_v : osc_v;       /* v54: panned view while frozen */
     for (int i = 0; i < N_SAMPLES; i++) {
         int src = (trig_offset + i);
         if (src >= N_SAMPLES) src -= N_SAMPLES;  /* wrap around buffer */
 
         /* Convert count -> voltage -> pixel offset */
-        float v = osc_v[src];
-        int y = CENTER_Y - (int)(v / volts_per_div * (float)GRID_Y_STEP);
+        float v = vs[src];
+        int y = CENTER_Y - (int)(v / volts_per_div * (float)GRID_Y_STEP) - mv_y_steps * GRID_Y_STEP / 10;   /* v54: Y move (0 = v53) */
 
         /* Clamp to waveform area only (do not draw over header) */
         if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
@@ -1599,15 +1750,19 @@ static void DrawTopPanel(void)
     /* Vpp — x=2 */
     if (hold_active) {
         /* ── HOLD: ค่าที่ cursor C1/C2 (เหมือน simulator) ────────────────── */
-        snprintf(buf, sizeof(buf), "U1=%.2fV", (double)osc_v[(osc_c1 + osc_plot_offset) % N_SAMPLES]);
+        snprintf(buf, sizeof(buf), "U1=%.2fV", (double)MvShownV(osc_c1 + osc_plot_offset));
         HDRT(buf, 2, 10, YELLOW, 1, BLACK);
-        snprintf(buf, sizeof(buf), "U2=%.2fV", (double)osc_v[(osc_c2 + osc_plot_offset) % N_SAMPLES]);
+        snprintf(buf, sizeof(buf), "U2=%.2fV", (double)MvShownV(osc_c2 + osc_plot_offset));
         HDRT(buf, 72, 10, YELLOW, 1, BLACK);
-        snprintf(buf, sizeof(buf), "dV=%.2fV", (double)(osc_v[(osc_c2 + osc_plot_offset) % N_SAMPLES] - osc_v[(osc_c1 + osc_plot_offset) % N_SAMPLES]));
+        snprintf(buf, sizeof(buf), "dV=%.2fV", (double)(MvShownV(osc_c2 + osc_plot_offset) - MvShownV(osc_c1 + osc_plot_offset)));
         HDRT(buf, 148, 10, YELLOW, 1, BLACK);
         snprintf(buf, sizeof(buf), "dt=%.2fms",
                  (double)((float)(osc_c2 - osc_c1) / osc_fs_eff * 1000.0f));
         HDRT(buf, 2, 20, YELLOW, 1, BLACK);
+        snprintf(buf, sizeof(buf), "MOVE:%c", mv_axis_x ? 'X' : 'Y');                  /* v54: frozen only */
+        HDRT(buf, 72, 20, ORANGE, 1, BLACK);
+        snprintf(buf, sizeof(buf), "%s%s ", slow_active ? "SLOW" : "FAST", osc_auto_tb ? "" : "*");   /* * = forced */
+        HDRT(buf, 148, 20, osc_auto_tb ? GREEN : ORANGE, 1, BLACK);
     } else {
     snprintf(buf, sizeof(buf), "Vp:%.2fV", (double)osc_meas.vpp);
     HDRT(buf, 2, 10, CYAN, 1, BLACK);
@@ -1645,7 +1800,7 @@ static void DrawTopPanel(void)
     else
         snprintf(buf, sizeof(buf), "ROLL");
     HDRT(buf, 148, 20, CYAN, 1, BLACK);
-    HDRT(osc_auto_tb ? "AUT" : "MAN", 232, 20, osc_auto_tb ? GREEN : ORANGE, 1, BLACK);   /* time base: automatic / manual (PC13) */
+    HDRT(osc_auto_tb ? "AUT  " : (slow_active ? "SLOW*" : "FAST*"), 232, 20, osc_auto_tb ? GREEN : ORANGE, 1, BLACK);   /* time base: automatic / forced (F key, PC13, T/DIV) */
 #if ADC_INPUT_ENABLE
     /* CLIP: ADC ชน 0 หรือ 4095 => สัญญาณเกินช่วง 0-3.3 V (ยอดคลื่นแบนจริง ไม่ใช่บั๊กจอ) */
     HDRT((osc_frame_valid && (dbg_adc_min <= 8u || dbg_adc_max >= 4087u)) ? "CLIP" : "    ",
@@ -1713,32 +1868,52 @@ static uint8_t ButtonLongPress(Button *btn, uint32_t now)
     return 0;
 }
 
+/* v54: UP/DOWN are held, not toggled. Returns the number of steps due now: 1 on the press, then 1 every BTN_REPEAT_MS after BTN_REPEAT_FIRST_MS,
+ * BTN_ACCEL_STEPS per repeat once held for BTN_ACCEL_MS. raw = 1 while the pin reads pressed. */
+static int ButtonRepeat(Button *b, uint8_t raw, uint32_t now)
+{
+    if (!raw) {
+        if (b->is_held) {
+            if (!b->low_pending) { b->low_pending = 1; b->low_tick = now; }
+            else if ((now - b->low_tick) >= BTN_REL_MS) { b->is_held = 0; b->low_pending = 0; }
+        }
+        return 0;
+    }
+    b->low_pending = 0;
+    if (!b->is_held) {
+        b->is_held = 1; b->held_since_tick = now; b->next_rep_tick = now + BTN_REPEAT_FIRST_MS;
+        return 1;
+    }
+    if ((int32_t)(now - b->next_rep_tick) >= 0) {
+        b->next_rep_tick = now + BTN_REPEAT_MS;
+        return ((now - b->held_since_tick) >= BTN_ACCEL_MS) ? BTN_ACCEL_STEPS : 1;
+    }
+    return 0;
+}
+
+static uint8_t ButtonRaw(const Button *b)
+{
+    return (HAL_GPIO_ReadPin(b->port, b->pin) == GPIO_PIN_RESET) ? 1u : 0u;   /* active LOW */
+}
+
 /* --------------------------------------------------------------------------
  * HandleButtons
  * Call this every loop iteration (before frame logic).
+ * Roles: HOLD pin = FREEZE | SET pin = AUTO | UP pin = UP/LEFT | DOWN pin = DOWN/RIGHT | PC13 = FAST<>SLOW (short) / AUTO FAST/SLOW (long)
  * -------------------------------------------------------------------------- */
 static void HandleButtons(uint32_t now)
 {
-    /* ทำตาม simulator: UP/DOWN ปรับ setting ที่เลือก, SET วน setting, HOLD freeze */
-    if (ButtonJustPressed(&btn_up, now))   OscAdjust(+1);
+    int n;
+    MvSync();
 
-    if (ButtonJustPressed(&btn_down, now)) OscAdjust(-1);
+    if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) ActUp(n);
+    if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) ActDown(n);
 
-    if (ButtonJustPressed(&btn_hold, now)) {
-        hold_active = !hold_active;
-        osc_sidx    = 0;
-        osc_dirty   = 1;
-    }
+    if (ButtonJustPressed(&btn_hold, now)) ActFreeze();
 
-    if (ButtonJustPressed(&btn_set, now)) {
-        OscSetIndex(osc_sidx + 1);
-        osc_dirty = 1;
-    }
-
-    /* BTN_SET long press (2 s) — auto scale */
-    if (ButtonLongPress(&btn_set, now)) {
-        AutoScale();
-    }
+    /* SET pin is the AUTO button now (v53: short = next setting, long = auto scale). The old SET job stays on UART 's'. */
+    if (ButtonJustPressed(&btn_set, now)) ActAuto();
+    (void)ButtonLongPress;
 
     /* PC13: manual FAST/SLOW. Acts on release (short) or after 1 s held (back to AUTO). */
     {
@@ -1746,8 +1921,8 @@ static void HandleButtons(uint32_t now)
         static uint32_t man_t0 = 0;
         uint8_t pressed = (HAL_GPIO_ReadPin(BTN_MAN_PORT, BTN_MAN_PIN) == (BTN_MAN_ACTIVE_HIGH ? GPIO_PIN_SET : GPIO_PIN_RESET)) ? 1u : 0u;
         if (pressed && !man_prev) { man_t0 = now; man_long = 0; }
-        if (pressed && !man_long && (now - man_t0) >= BTN_MAN_LONG_MS) { man_long = 1; OscAutoRearm(); }
-        if (!pressed && man_prev && !man_long && (now - man_t0) >= 40u) OscManualToggle();
+        if (pressed && !man_long && (now - man_t0) >= BTN_MAN_LONG_MS) { man_long = 1; ActAutoMode(); }
+        if (!pressed && man_prev && !man_long && (now - man_t0) >= 40u) ActToggleFastSlow();
         man_prev = pressed;
     }
 }
@@ -2455,6 +2630,7 @@ static void FAST_O2 AdcCaptureFrame(void)
         if (v < vmin) vmin = v;
         if (v > vmax) vmax = v;
     }
+    MvStoreExt(start, step, w, n);   /* v54: keep the display points just outside the window, for X move while frozen */
 
     /* แกนเวลา: อัตราสุ่มจริงหลัง resample (ไม่ใช้ค่าที่ตั้งไว้) */
     osc_fs_eff = dbg_adc_rate / step;
@@ -2874,7 +3050,114 @@ static void SlowCaptureFrame(void)
 }
 /* SLOW_END ================================================================= */
 
+/* MOVE_DATA_BEGIN ============================================================
+ * The data that X move pans over. FAST: the display points just outside the window (before it / after it), computed from the raw capture of THIS frame
+ * (the next capture overwrites adc_raw_buf while the picture is drawn, so it cannot be read later). SLOW: a copy of the 8 s history taken at the moment of
+ * the freeze (the live history keeps running). Nothing is invented: outside these ranges X move stops. */
+#define MV_EXT_MAX 256
+static uint16_t mv_ext_lo[MV_EXT_MAX], mv_ext_hi[MV_EXT_MAX];   /* lo[j] = display point -1-j, hi[j] = display point N_SAMPLES+j */
+static int      mv_nlo = 0, mv_nhi = 0;                          /* how many of each exist */
+static uint16_t mv_snap[SLOW_HIST_N];
+static uint32_t mv_snap_end = 0, mv_snap_period = 1000u;
+static uint8_t  mv_slow_mode = 0;
+
+static FAST_O2 void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n)
+{
+    int k, cnt;
+    mv_nlo = 0; mv_nhi = 0;
+    for (cnt = 0, k = -1; cnt < MV_EXT_MAX; cnt++, k--) {
+        int32_t c = (int32_t)start + (int32_t)floorf((float)k * step + 0.5f);
+        int32_t lo = c - (int32_t)((w - 1u) / 2u);
+        uint32_t acc = 0;
+        if (lo < 0 || lo + (int32_t)w > (int32_t)n) break;
+        for (uint32_t q = 0; q < w; q++) acc += adc_raw_buf[(uint32_t)lo + q];
+        mv_ext_lo[cnt] = (uint16_t)(acc / w);
+        mv_nlo = cnt + 1;
+    }
+    for (cnt = 0, k = N_SAMPLES; cnt < MV_EXT_MAX; cnt++, k++) {
+        int32_t c = (int32_t)start + (int32_t)((float)k * step + 0.5f);
+        int32_t lo = c - (int32_t)((w - 1u) / 2u);
+        uint32_t acc = 0;
+        if (lo < 0 || lo + (int32_t)w > (int32_t)n) break;
+        for (uint32_t q = 0; q < w; q++) acc += adc_raw_buf[(uint32_t)lo + q];
+        mv_ext_hi[cnt] = (uint16_t)(acc / w);
+        mv_nhi = cnt + 1;
+    }
+}
+
+static void MvFreezeCapture(void)            /* called once, at the moment of the freeze: fixes the pan range */
+{
+    mv_x_min = 0; mv_x_max = 0; mv_slow_mode = 0;
+    if (slow_active) {
+        uint32_t valid = slow_valid_cnt;
+        if (valid > SLOW_HIST_N) valid = SLOW_HIST_N;
+        if (valid < 64u) return;
+        for (uint32_t i = 0; i < SLOW_HIST_N; i++) mv_snap[i] = slow_hist[i];
+        mv_snap_end    = slow_last_t + 1u;
+        mv_snap_period = slow_period_us ? slow_period_us : 1000u;
+        {   uint32_t win   = (uint32_t)(((uint64_t)N_SAMPLES * mv_snap_period + 999u) / 1000u) + 2u;     /* ticks the window needs */
+            uint32_t avail = valid - 4u;                                                                  /* ticks of real history behind the newest */
+            if (avail > win) {
+                uint32_t pts = (uint32_t)(((uint64_t)(avail - win) * 1000u) / mv_snap_period);
+                mv_x_min = -(int)((pts > 30000u) ? 30000u : pts);
+            }
+        }
+        mv_slow_mode = 1;
+    } else {
+        mv_x_min = -mv_nlo;
+        mv_x_max = mv_nhi;
+    }
+}
+
+static uint16_t MvSlowPoint(int j, int pan)  /* display point j of the SLOW window moved |pan| points earlier (same averaging as SlowBuildPointsAt) */
+{
+    uint32_t period = mv_snap_period;
+    uint32_t back_us = (uint32_t)(-pan) * period;
+    uint32_t t_end = mv_snap_end;
+    if (period < 1000u) {
+        uint32_t off_us = (N_SAMPLES - 1u - (uint32_t)j) * period + back_us;
+        uint32_t off_ms = off_us / 1000u, rem = off_us % 1000u;
+        uint32_t t_low = (t_end - 1u) - off_ms - (rem ? 1u : 0u);
+        uint32_t a = mv_snap[t_low & (SLOW_HIST_N - 1u)];
+        uint32_t b = rem ? mv_snap[(t_low + 1u) & (SLOW_HIST_N - 1u)] : a;
+        return (uint16_t)((a * rem + b * (1000u - rem)) / 1000u);
+    } else {
+        uint32_t tb = back_us / 1000u;
+        uint32_t off_a = (((N_SAMPLES - (uint32_t)j) * period + 999u) / 1000u) + tb;
+        uint32_t off_b = (((N_SAMPLES - 1u - (uint32_t)j) * period + 999u) / 1000u) + tb;
+        uint32_t sum = 0, cnt = 0;
+        for (uint32_t tk = t_end - off_a; tk != t_end - off_b; tk++) { sum += mv_snap[tk & (SLOW_HIST_N - 1u)]; cnt++; }
+        return (uint16_t)(cnt ? (sum / cnt) : mv_snap[(t_end - off_b) & (SLOW_HIST_N - 1u)]);
+    }
+}
+
+static void MvBuildView(void)                /* mv_view_v[] = the frozen capture panned by mv_x_pts (same calibration + filter as OscProcessFrame) */
+{
+    float cnt[N_SAMPLES];
+    const float kv = ADC_VREF / (float)ADC_FULL;
+    int win = (osc_fwin < 1) ? 1 : osc_fwin, half;
+    if ((win % 2) == 0) win++;
+    half = win / 2;
+    for (int i = 0; i < N_SAMPLES; i++) {
+        int k = i + mv_x_pts;
+        if (mv_slow_mode)  cnt[i] = (float)MvSlowPoint(i, mv_x_pts);
+        else if (k < 0)    cnt[i] = (float)mv_ext_lo[OscClampI(-k - 1, 0, MV_EXT_MAX - 1)];
+        else if (k < N_SAMPLES) cnt[i] = (float)raw_samples[k];
+        else               cnt[i] = (float)mv_ext_hi[OscClampI(k - N_SAMPLES, 0, MV_EXT_MAX - 1)];
+    }
+    for (int i = 0; i < N_SAMPLES; i++) {
+        float acc = 0.0f;
+        for (int j = -half; j <= half; j++) acc += cnt[OscClampI(i + j, 0, N_SAMPLES - 1)];
+        mv_view_v[i] = (acc / (float)win - osc_offset_ct) * kv;
+    }
+    mv_view_on = (mv_x_pts != 0);
+}
+/* MOVE_DATA_END ============================================================= */
+
 #else  /* !ADC_INPUT_ENABLE */
+static void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n) { (void)start; (void)step; (void)w; (void)n; }
+static void MvFreezeCapture(void) { mv_x_min = mv_x_max = 0; }
+static void MvBuildView(void) { mv_view_on = 0; }
 void OscSlowTick(void) { }
 static float SlowProbeFreq(int ti) { (void)ti; return 0.0f; }
 static uint8_t SlowSlowish(void) { return 0u; }

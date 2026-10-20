@@ -23,6 +23,11 @@ pre = '''#include <stdint.h>
 #define N_SAMPLES 240
 #define ADC_PRE_POINTS 200
 #define ADC_VREF 3.3f
+/* the simulated ADC has no analog loss: board calibration off in the logic tests */
+#define ADC_INPUT_FC 1e12f
+#define ADC_INPUT_N 1.7f
+#define ADC_INPUT_GAIN 1.0f
+#define ADC_INPUT_GMAX 3.5f
 #define ADC_FULL 4095
 #define ADC_MID 2048
 #define OSC_H_DIVS 10
@@ -67,8 +72,17 @@ static uint8_t adc_f_held;static int osc_disp_cross;
 static float adc_last_good_vpp;static volatile uint32_t dbg_fm_fail[3];
 static float adc_hold_f;static float adc_last_good_f;static uint32_t adc_last_good_t,adc_legacy_t;static volatile uint32_t dbg_fm_cnt;static unsigned cap_calls;static uint32_t adc_hold_t,adc_over_t,adc_probe_t;static float adc_rough_ratio;static uint32_t tick_ms;static uint32_t HAL_GetTick(void){tick_ms+=40;return tick_ms;}static const uint8_t adc_meas_seq[3]={1,0,4};
 static float AdcRateHz(int l);static uint8_t AdcSetRateLevel(int l);
-#define OSC_V_FILL_DIVS 5.2f
+#define ATB_FAST_TO_SLOW_HZ 70.0f
+#define ATB_SLOW_TO_FAST_HZ 90.0f
+#define ATB_FAST_CYC 6.0f
+#define MV_EXT_MAX 256
+#define AS_MIN_VPP 0.05f
+#define AS_MIN_CYC 3.2f
+#define OSC_V_FILL_DIVS 4.0f
 #define OSC_FIT_CYCLES 2.5f
+#define FAST_O2_UNUSED
+static void MvStoreExt(uint32_t start,float step,uint32_t w,uint32_t n);static int OscAutoPickTdiv(float f);static void OscAutoApply(float vpp,int ti);static int AtbPickFast(float f);static int AtbPickSlow(float f);
+static uint16_t mv_ext_lo[MV_EXT_MAX],mv_ext_hi[MV_EXT_MAX];static int mv_nlo,mv_nhi,mv_y_steps,mv_view_on;static float mv_view_v[240];
 static uint8_t osc_auto_stage,osc_auto_tries,hold_active,osc_auto_tb=1;
 static volatile uint8_t slow_active;
 static float dbg_auto_fsel;
@@ -91,7 +105,7 @@ static uint8_t AdcCaptureStart(uint32_t n,uint32_t*t0){uint32_t u;start_calls++;
 static uint8_t AdcCaptureCollect(uint32_t n,uint32_t t0,uint32_t*t_us){(void)t0;*t_us=(uint32_t)(n/0.8f);return 1;}
 static void AdcAbortPending(void){if(adc_pend){adc_pend=0;abort_calls++;}}
 '''
-body='\n'.join(function(x) for x in ['OscProcessFrame','OscMeasureFrame','AdcRawFrequency','AdcPlanFrame','AdcPreFor','AdcPrestart','AdcCaptureFrame','MapToScreen','OscAutoScale','OscAutoScaleStep','AutoScale'])
+body='\n'.join(function(x) for x in ['OscProcessFrame','OscMeasureFrame','AdcRawFrequency','AdcPlanFrame','AdcPreFor','AdcPrestart','AdcCaptureFrame','MapToScreen','OscAutoScale','OscAutoScaleStep','AutoScale','MvStoreExt','AtbPickFast','AtbPickSlow','OscAutoPickTdiv','OscAutoApply'])
 # State-machine contract: both entry points must use the same implementation,
 # never consume held/failed captures, and never derive frequency from pixels.
 auto = function('OscAutoScaleStep')
@@ -260,7 +274,7 @@ main='''int main(void){int failures=0;
  if(osc_frame_valid||new_frame_ready||osc_meas.freq||dbg_adc_ok||osc_auto_stage!=1)failures++;
  if(osc_fs_eff!=saved_fs||osc_capture_tdiv!=saved_td)failures++;
  fail_capture=0;input_f=20000;AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();OscAutoScaleStep();
- if(!osc_frame_valid||!dbg_adc_ok||osc_auto_stage||(osc_tdiv_i!=1&&osc_tdiv_i!=2)||volts_per_div!=osc_vdivs[osc_vdiv_i])failures++;
+ if(!osc_frame_valid||!dbg_adc_ok||osc_auto_stage||osc_tdiv_i!=3||volts_per_div!=osc_vdivs[osc_vdiv_i])failures++;
  input_amp=0;for(int i=0;i<7;i++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();if(osc_meas.freq!=0)failures++;
  input_amp=10;for(int i=0;i<7;i++)AdcCaptureFrame();OscProcessFrame();OscMeasureFrame();if(osc_meas.freq!=0)failures++;
  input_amp=620;input_dc=2600;wave=1;
