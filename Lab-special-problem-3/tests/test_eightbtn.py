@@ -5,7 +5,8 @@ from pathlib import Path
 import re, subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_eightbtn'; OUT.mkdir(parents=True, exist_ok=True)
-src = (ROOT/'Core/Src/main.c').read_text()
+from rtos_norm import unrtos
+src = unrtos((ROOT/'Core/Src/main.c').read_text())
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 def function(name):
     m = re.search(r'^(?:static\s+)?(?:void|int|float|uint8_t|const char\s*\*)\s*'+name+r'\([^;]*?\)\s*\{', nocom, re.M)

@@ -104,7 +104,8 @@ ns = {'__file__': str(ROOT/'tests/test_realpic.py'), '__name__': 'realpic_inner'
 exec(compile(harness_py, 'realpic_harness', 'exec'), ns)
 
 # ---- contracts on the text of main.c ------------------------------------------------------------------------------------
-src = (ROOT/'Core/Src/main.c').read_text()
+from rtos_norm import unrtos
+src = unrtos((ROOT/'Core/Src/main.c').read_text())
 before = ROOT.parent/'builds/v57/main_before.c'
 def slow_text(t): return t[t.index('SLOW_BEGIN ='):t.index('SLOW_END =')]
 bt = before.read_text() if before.exists() else None

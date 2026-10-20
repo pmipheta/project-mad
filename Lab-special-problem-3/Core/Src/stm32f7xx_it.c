@@ -20,6 +20,8 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f7xx_it.h"
+#include "FreeRTOS.h"
+#include "task.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -138,18 +140,7 @@ void UsageFault_Handler(void)
   }
 }
 
-/**
-  * @brief This function handles System service call via SWI instruction.
-  */
-void SVC_Handler(void)
-{
-  /* USER CODE BEGIN SVCall_IRQn 0 */
-
-  /* USER CODE END SVCall_IRQn 0 */
-  /* USER CODE BEGIN SVCall_IRQn 1 */
-
-  /* USER CODE END SVCall_IRQn 1 */
-}
+/* SVC_Handler provided by FreeRTOS port.c (mapped in FreeRTOSConfig.h) */
 
 /**
   * @brief This function handles Debug monitor.
@@ -164,18 +155,7 @@ void DebugMon_Handler(void)
   /* USER CODE END DebugMonitor_IRQn 1 */
 }
 
-/**
-  * @brief This function handles Pendable request for system service.
-  */
-void PendSV_Handler(void)
-{
-  /* USER CODE BEGIN PendSV_IRQn 0 */
-
-  /* USER CODE END PendSV_IRQn 0 */
-  /* USER CODE BEGIN PendSV_IRQn 1 */
-
-  /* USER CODE END PendSV_IRQn 1 */
-}
+/* PendSV_Handler provided by FreeRTOS port.c (mapped in FreeRTOSConfig.h) */
 
 /**
   * @brief This function handles System tick timer.
@@ -188,6 +168,8 @@ void SysTick_Handler(void)
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
   { extern void OscSlowTick(void); OscSlowTick(); }   /* SLOW mode sampler (1 kHz) */
+  /* FreeRTOS shares SysTick with the HAL tick: HAL_IncTick() above always runs; the kernel tick only once the scheduler runs */
+  { extern void xPortSysTickHandler(void); if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) { xPortSysTickHandler(); } }
 
   /* USER CODE END SysTick_IRQn 1 */
 }

@@ -207,7 +207,8 @@ ns = {'__file__': str(ROOT/'tests/test_zoom.py'), '__name__': 'zoom_inner'}
 exec(compile(harness_py, 'zoom_harness', 'exec'), ns)
 
 # ---- real UartPoll: '+' / '-' are immediate keys, "v +" / "t -" stay line commands --------------------------------------
-src = (ROOT/'Core/Src/main.c').read_text()
+from rtos_norm import unrtos
+src = unrtos((ROOT/'Core/Src/main.c').read_text())
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 def func(t, name):
     m = re.search(r'^static\s+\w+\s+' + name + r'\([^;]*?\)\s*\{', t, re.M); assert m, name
