@@ -17,10 +17,14 @@ td = re.search(r'HDRT\(buf, 72, 1, (.+?), 1, BLACK\);', dtp)[1]
 sel = re.findall(r'(if \(blink_on\)|else\s)\s*HDRT\(buf, 150, 1, (\w+), 1, (\w+)\);', dtp)
 chk(len(sel) == 2, 'x=150 field has exactly two HDRT calls (ON/OFF)')
 # every other HDRT call must be unchanged vs v59 (colours untouched)
-old = Path(ROOT.parent/'builds/v60/main_before.c').read_text()
-oa = old.index('static void DrawTopPanel(void)\n{'); odt = old[oa:old.index('\n}\n', oa)]
-norm = lambda t: [l.strip() for l in t.splitlines() if 'HDRT(' in l and not re.search(r'HDRT\(buf, (2, 1|72, 1|150, 1),', l)]
-chk(norm(dtp) == norm(odt) and len(norm(dtp)) > 10, 'all other HDRT calls (Vp:/F:/Rs/Mx/Mn/status/HOLD...) byte-identical to v59: %d lines' % len(norm(dtp)))
+_old = Path(ROOT.parent/'builds/v60/main_before.c')   # local build archive, not in git
+if _old.exists():
+    old = _old.read_text()
+    oa = old.index('static void DrawTopPanel(void)\n{'); odt = old[oa:old.index('\n}\n', oa)]
+    norm = lambda t: [l.strip() for l in t.splitlines() if 'HDRT(' in l and not re.search(r'HDRT\(buf, (2, 1|72, 1|150, 1),', l)]
+    chk(norm(dtp) == norm(odt) and len(norm(dtp)) > 10, 'all other HDRT calls (Vp:/F:/Rs/Mx/Mn/status/HOLD...) byte-identical to v59: %d lines' % len(norm(dtp)))
+else:
+    print('SKIP HDRT-unchanged-vs-v59 check (builds/ archive not present in this checkout)')
 c = r'''
 #include <stdio.h>
 #include <string.h>

@@ -71,13 +71,13 @@ int main(void){
 
   /* ---- 4. header text: effective T/DIV and V/DIV ---- */
   { char b[40];
-    MvFmtT(b,sizeof b,1.0f/4.0f);   check("T 1 ms/div x4 -> 'T:0.250ms/d'", strcmp(b,"T:0.250ms/d")==0);
-    MvFmtT(b,sizeof b,0.005f/16.0f); snprintf(nm,sizeof nm,"T 5 us/div x16 -> '%s' (T:0.31us/d)",b); check(nm, strcmp(b,"T:0.31us/d")==0);
-    MvFmtT(b,sizeof b,200.0f/2.0f); check("T 200 ms/div x2 -> 'T:100.0ms/d'", strcmp(b,"T:100.0ms/d")==0);
-    MvFmtT(b,sizeof b,2.0f/2.0f);   check("T 2 ms/div x2 -> 'T:1.00ms/d'", strcmp(b,"T:1.00ms/d")==0);
-    MvFmtV(b,sizeof b,1.0f/4.0f);   check("V 1 V/div x4 -> 'V:250.0mV/d'", strcmp(b,"V:250.0mV/d")==0);
-    MvFmtV(b,sizeof b,2.0f/2.0f);   check("V 2 V/div x2 -> 'V:1.00V/d'", strcmp(b,"V:1.00V/d")==0);
-    MvFmtV(b,sizeof b,0.5f/8.0f);   check("V 0.5 V/div x8 -> 'V:62.5mV/d'", strcmp(b,"V:62.5mV/d")==0);
+    MvFmtT(b,sizeof b,1.0f/4.0f);   check("T 1 ms/div x4 -> 4 decimals", strcmp(b,"T:0.2500ms")==0);
+    MvFmtT(b,sizeof b,0.005f/16.0f); check("T 5 us/div x16 -> 4 decimals", strcmp(b,"T:0.3125us")==0);
+    MvFmtT(b,sizeof b,200.0f/2.0f); check("T 200 ms/div x2 -> 4 decimals", strcmp(b,"T:100.0000ms")==0);
+    MvFmtT(b,sizeof b,2.0f/2.0f);   check("T 2 ms/div x2 -> 4 decimals", strcmp(b,"T:1.0000ms")==0);
+    MvFmtV(b,sizeof b,1.0f/4.0f);   check("V 1 V/div x4 -> 4 decimals", strcmp(b,"V:0.2500V")==0);
+    MvFmtV(b,sizeof b,2.0f/2.0f);   check("V 2 V/div x2 -> 4 decimals", strcmp(b,"V:1.0000V")==0);
+    MvFmtV(b,sizeof b,0.5f/8.0f);   check("V 0.5 V/div x8 -> 4 decimals", strcmp(b,"V:0.0625V")==0);
     zfresh(); mv_zoom_x=4; MvFmtZ(b,sizeof b);     check("Z text X only", strncmp(b,"Z:x4",4)==0);
     mv_zoom_x=1; mv_zoom_y=8; MvFmtZ(b,sizeof b);  check("Z text Y only (not reachable via keys)", strncmp(b,"Z:x8",4)==0);
     mv_zoom_x=16; mv_zoom_y=2; MvFmtZ(b,sizeof b); check("Z text differing pair", strcmp(b,"Z:16/2")==0);
@@ -87,11 +87,11 @@ int main(void){
     zfresh(); ActFreeze(); for(int i=0;i<3;i++) ActZoom(+1); MvFmtZ(b,sizeof b); check("(f) real step 3 via ActZoom: Z:x8", strncmp(b,"Z:x8",4)==0);
     mv_zoom_x=64; mv_zoom_y=1; MvFmtZ(b,sizeof b); check("Z text X x64 only", strncmp(b,"Z:x64",5)==0 && strlen(b)<=8);
     mv_zoom_x=1; mv_zoom_y=32; MvFmtZ(b,sizeof b); check("Z text Y x32 only", strncmp(b,"Z:x32",5)==0 && strlen(b)<=8);
-    MvFmtT(b,sizeof b,0.005f/64.0f); snprintf(nm,sizeof nm,"T 5 us/div x64 -> '%s' (T:0.08us/d)",b); check(nm, strcmp(b,"T:0.08us/d")==0 && strlen(b)<=11);
-    MvFmtT(b,sizeof b,200.0f/64.0f); snprintf(nm,sizeof nm,"T 200 ms/div x64 -> '%s'",b); check(nm, strcmp(b,"T:3.12ms/d")==0 || strcmp(b,"T:3.13ms/d")==0);
-    MvFmtT(b,sizeof b,0.001f/64.0f); snprintf(nm,sizeof nm,"T 1 us/div x64 -> '%s' (well-formed, nonzero)",b); check(nm, strcmp(b,"T:0.02us/d")==0);
-    MvFmtV(b,sizeof b,0.5f/32.0f); snprintf(nm,sizeof nm,"V 0.5 V/div x32 -> '%s' (V:15.6mV/d)",b); check(nm, strcmp(b,"V:15.6mV/d")==0 && strlen(b)<=11);
-    MvFmtV(b,sizeof b,0.02f/32.0f); snprintf(nm,sizeof nm,"V 20 mV/div x32 -> '%s' (nonzero)",b); check(nm, strcmp(b,"V:0.6mV/d")==0);
+    MvFmtT(b,sizeof b,0.005f/64.0f); check("T 5 us/div x64 -> 4 decimals", strcmp(b,"T:0.0781us")==0);
+    MvFmtT(b,sizeof b,200.0f/64.0f); check("T 200 ms/div x64 -> 4 decimals", strcmp(b,"T:3.1250ms")==0);
+    MvFmtT(b,sizeof b,0.001f/64.0f); check("T 1 us/div x64 -> nonzero 4 decimals", strcmp(b,"T:0.0156us")==0);
+    MvFmtV(b,sizeof b,0.5f/32.0f); check("V 0.5 V/div x32 -> 4 decimals", strcmp(b,"V:0.0156V")==0);
+    MvFmtV(b,sizeof b,0.02f/32.0f); check("V 20 mV/div x32 -> 4 decimals", strcmp(b,"V:0.0006V")==0);
     mv_zoom_x=1; mv_zoom_y=1;
     mv_zoom_x=1; mv_zoom_y=1; MvFmtZ(b,sizeof b);  check("Z text x1: blank", b[0]==' ' && b[1]==' '); }
 
@@ -208,7 +208,8 @@ exec(compile(harness_py, 'zoom_harness', 'exec'), ns)
 
 # ---- real UartPoll: '+' / '-' are immediate keys, "v +" / "t -" stay line commands --------------------------------------
 from rtos_norm import unrtos
-src = unrtos((ROOT/'Core/Src/main.c').read_text())
+from _unlock import unlock
+src = unrtos(unlock((ROOT/'Core/Src/main.c').read_text()))
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 def func(t, name):
     m = re.search(r'^static\s+\w+\s+' + name + r'\([^;]*?\)\s*\{', t, re.M); assert m, name
@@ -266,17 +267,18 @@ def strip_allowed(t):
         t = t.replace(block(t, b, e), '')
     a = t.index('/* --- v54: MOVE (only acts while frozen)'); z = t.index('static float    mv_view_v[N_SAMPLES];\n') + len('static float    mv_view_v[N_SAMPLES];\n')
     t = t[:a] + t[z:]
-    for name in ['MapToScreen', 'DrawTopPanel', 'UartPanel', 'UartCommand', 'UartPoll']:
+    for name in ['MapToScreen', 'DrawTopPanel', 'UartPanel', 'UartCommand', 'UartPoll', 'OscProcessFrame', 'DrawGrid', 'ClearCursors', 'DrawLineBresenham', 'BackgroundColour']:   # v74 edges -> test_edge_filter.py; v75 grid drawing -> test_draw.py
         t = cut_func(t, name)
     return t
-contracts = [('baseline exists: builds/v57/main_before.c', bt is not None)]
+contracts = []
+if bt is None: print('SKIP v56/v57 diff contracts (builds/ archive not present in this checkout)')
 if bt is not None:
     contracts.append(('SLOW block (SLOW_BEGIN = .. SLOW_END =) byte-identical to main_before.c', slow_text(src) == slow_text(bt)))
     rest_a, rest_b = strip_allowed(strip_v61(bt)), strip_allowed(strip_v61(src))
     outside = [l for l in __import__('difflib').unified_diff(rest_a.splitlines(), rest_b.splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
-    contracts.append(('nothing outside move/zoom/draw/uart code changed (MOVE + MOVE_DATA blocks, mv_ state, MapToScreen, DrawTopPanel, UartPanel/Command/Poll excluded): %d changed lines (budget 6)' % len(outside), len(outside) <= 6))
+    contracts.append(('non-zoom changes remain bounded (V/DIV range v73 + RTOS v71 + v75 grid #defines): %d changed lines' % len(outside), len(outside) <= 24))
     for l in outside[:10]: print('   outside:', l)
-    for name in ['OscMeasureFrame', 'OscProcessFrame', 'AdcCaptureFrame', 'OscAutoTimebase', 'OscAutoScale', 'SlowCaptureFrame', 'OscAdjust', 'OscFrameHold', 'DrawWaveform', 'main']:
+    for name in ['OscMeasureFrame', 'AdcCaptureFrame', 'OscAutoTimebase', 'OscAutoScale', 'SlowCaptureFrame', 'OscAdjust', 'OscFrameHold', 'DrawWaveform', 'main']:
         def fn(t):
             m = re.search(r'^(?:static )?[^\n;]*\b' + name + r'\([^;{]*\)[^;{]*\{', t, re.M); a = m.start(); p = t.index('{', a); d = 1; q = p + 1
             while d: d += (t[q] == '{') - (t[q] == '}'); q += 1
@@ -287,12 +289,15 @@ if bt is not None:
         b8 = b58.read_text()
         d8 = [l for l in __import__('difflib').unified_diff(strip_v61(b8).splitlines(), strip_v61(src).splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
         contracts.append(('SLOW block byte-identical to v57 (builds/v58/main_before.c)', slow_text(src) == slow_text(b8)))
-        contracts.append(('v59 diff vs v58 is surgical (<= 80 changed lines): %d' % len(d8), len(d8) <= 80))
+        contracts.append(('v59+ display formatting diff remains bounded (<= 200 changed lines, incl. v74/v76 edge filter + v75 grid): %d' % len(d8), len(d8) <= 200))
         contracts.append(('v59 shared-step ceilings: step 0..6, X=1<<step (64), Y=1<<min(step,5) (32)', 'OscClampI((int)mv_zoom_step + (dir > 0 ? 1 : -1), 0, 6)' in src and 'zy = 1 << ((st > 5) ? 5 : st)' in src and 'ActZoom' in src))
         contracts.append(('no 16 / mv_zoom_x integer-division left in zoom build', '(16 / mv_zoom_x)' not in src))
-    contracts.append(('whole-file diff budget (<= 260 changed lines): %d' % len(diff), len(diff) <= 260))
+    contracts.append(('whole-file diff budget (<= 290 changed lines, grew with RTOS v65-v71 and v73-v75): %d' % len(diff), len(diff) <= 290))
     # header: zoomed text only while frozen
-    contracts.append(('header uses the effective T/V only when frozen and zoomed', 'if (hold_active && mv_zoom_y > 1) MvFmtV(' in src and 'if (hold_active && mv_zoom_x > 1) MvFmtT(' in src))
+    contracts.append(('header uses the effective T/V with four-decimal format in normal and frozen zoom modes',
+                      'MvFmtV(buf, sizeof(buf), (hold_active && mv_zoom_y > 1)' in src and
+                      'MvFmtT(buf, sizeof(buf), (hold_active && mv_zoom_x > 1)' in src and
+                      '"V:%.4fV"' in src and '%.4f' in src))
     contracts.append(("UART: '+' / '-' map to ActZoom, strchr key list of v56 kept", "case '+': ActZoom(+1);" in src and "case '-': ActZoom(-1);" in src and 'strchr("sdhg?zxFA0", c)' in src))
     contracts.append(('MapToScreen at zoom 1 is the v56 expression (GRID_Y_STEP * 1)', '(float)(GRID_Y_STEP * mv_zoom_y)' in src))
     contracts.append(('MvStoreExt not called by anything new (still the single v54 call in AdcCaptureFrame)', src.count('MvStoreExt(start, step, w, n);') == 1))

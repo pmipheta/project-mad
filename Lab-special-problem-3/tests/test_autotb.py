@@ -6,6 +6,13 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__import__('tempfile').gettempdir()) / 'osc_autotb'
 OUT.mkdir(parents=True, exist_ok=True)
 src = (ROOT/'Core/Src/main.c').read_text()
+# Host harness is single-threaded: remove Step-3 locking wrappers while
+# retaining the production expressions under test.
+try:
+    import _unlock
+    src = _unlock.unlock(src)
+except ImportError:
+    pass
 a, b = src.index('AUTO_TB_BEGIN'), src.index('AUTO_TB_END')
 block = src[src.rfind('/*', 0, a):src.index('\n', b)+1]
 (OUT/'atb_extract.c').write_text(block)

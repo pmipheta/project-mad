@@ -1,56 +1,55 @@
 # FreeRTOS refactor — status (2026-10-20)
 
-## What's flashed and working right now
-**v65 (this commit)** — Step 1 of the FreeRTOS refactor only: the kernel
-is in, the entire old bare-metal main loop runs inside ONE task
-(`vMainTask`), zero functional change from the pre-RTOS firmware. Hardware
-confirmed by the user: all 8 physical buttons, UART commands, Vpp/F
-measurement, Slow mode, stable-lock, freeze — all work exactly like the
-pre-RTOS version.
+## On the board now: v76 (this commit)
+- **Step 1 (v65):** FreeRTOS kernel; the whole old bare-metal loop runs in one task
+  (`vMainTask`). Hardware-verified: all 8 buttons, UART, measurements, Slow mode,
+  stable-lock, freeze behave exactly like the pre-RTOS firmware.
+- **Step 3a (v71): mutex around shared state — WORKING on hardware.**
+  `xOscMutex` protects `osc_meas`, `osc_sidx`, `hold_active`, `osc_dirty`,
+  `osc_stable`, `osc_auto_tb` (`OSC_LOCK/OSC_UNLOCK`, `OSC_SET`, `OscMeasGet`).
+  Still one task; this prepares the split.
+- v72–v76 on top: 4-decimal V/DIV and T/DIV, V/DIV down to 0.0001 V, no spikes at
+  the filter edges, vertical grid every 1 T/DIV. See `SOURCE_CODE_GUIDE.md` §12.
 
-## What's NOT in this commit (parked, broken)
-**Step 3a (splitting into tasks, starting with a mutex)** was attempted
-twice and hung the board both times — screen blank white, ADC stops
-capturing (confirmed via SWD: capture count stuck at 0). Root cause of
-attempt #1 (mutex `Take()` calls running before `vTaskStartScheduler()`)
-was found and fixed in attempt #2, but attempt #2 **still hung** —
-meaning there is a second, not-yet-found cause. All PC-side tests passed
-both times; the bug only shows on real hardware, which is why nothing
-broken was pushed. This work is **on hold**, not abandoned — the next
-attempt needs a different diagnosis approach (step through on actual
-silicon via breakpoints, not just text-pattern tests).
+## Step 3a: how the hang was found
+Two earlier attempts (v66, v66b) froze the board (white screen, ADC capture count 0)
+even though every PC test passed. It was isolated on the board one change at a time:
 
-Recovery each time: full board backup before every flash, mass-erase +
-clean reflash of v65 confirmed working again both times.
+| Build | Change | Board |
+|---|---|---|
+| v67 | create the mutex only (no locking) | works |
+| v68 | + one take/give at the start of the task | works |
+| v69 | full locking, mutex created **early** in `main()` | **white screen** (reproduced) |
+| v70/v71 | same full locking, mutex created **right before `xTaskCreate`** | works |
 
-## Known limitation found this session: Slow mode can't "stop roll"
-The STABLE/lock toggle (PC3 short-press / UART `m`) only has an effect
-when `osc_stable && osc_lock_auto` — and `osc_lock_auto` only turns on
-at signal frequency ≥45 Hz. Slow mode exists specifically for signals
-*below* that range, so the picture always rolls/free-runs in Slow mode,
-regardless of the STABLE toggle. This is not something v61-v66 broke —
-it's how the lock mechanism has always worked.
+**Root cause:** creating the mutex early in `main()` (right after the clock setup,
+before the peripheral/LCD init) hangs the board. The fix is the creation point.
+Rules kept by `tests/test_rtos_step3a.py`: no take/give before
+`vTaskStartScheduler()`, none in any ISR, no nested locking, no UART/LCD/HAL call
+inside a critical section. Its negative control still flags the hanging v66 source.
 
-Fixing this would mean giving Slow mode its own trigger-lock logic,
-which means touching the Slow block — **explicitly off-limits** per
-standing project rule, unless the user clears that specific exception.
-Not done. Waiting on a decision.
+## Next steps
+1. Step 3b: move `HandleButtons` + `UartPoll` into `vInputTask`.
+2. Step 3c: move drawing into `vDisplayTask`.
+3. ADC / measurement / Slow block stay in the main task (timing-sensitive).
+Each step: one change per flash, flash backup first, PC suites (`tests/run_all.py`)
+plus a live check on the board.
 
-## Testing gotcha learned this session
-Short physical button presses tested by typing in chat ("press X, tell
-me when done") can accidentally exceed a button's long-press threshold
-(e.g. PC3's 1500 ms) just from round-trip message latency — making a
-working short-press action look broken. Confirmed by reading
-`osc_stable`/GPIO registers live over SWD before and after a press:
-the hardware and short-press logic both work correctly; the apparent
-failure was the user unintentionally holding past 1.5 s while waiting
-for a response. Test button timing with quick taps, not hold-and-wait.
+## Known limitation: SLOW mode cannot "stop roll"
+STABLE (PC3 short / UART `m`) only acts when `osc_stable && osc_lock_auto`, and
+`osc_lock_auto` turns on at ≥ 45 Hz. SLOW signals are below that, so they always
+roll. Changing this means editing the Slow block (frozen by project rule) — not done.
+
+## Testing notes
+- Button long-press tests over chat: round-trip delay can exceed the 1.5 s long-press
+  of PC3 and make a working short press look broken. Verify by reading the variable
+  over SWD around one quick tap.
+- Judge test scripts by their printed results (`run_all.py`), not exit code alone:
+  `test_eightbtn.py` used to print FAIL lines and still exit 0.
 
 ## Files
-- `Lab-special-problem-3/Core/Src/main.c` — v65: kernel + one task, else unchanged
-- `Lab-special-problem-3/Core/Src/stm32f7xx_it.c` — SysTick dual-handler fix (HAL_IncTick + guarded xPortSysTickHandler)
-- `Lab-special-problem-3/Core/Inc/FreeRTOSConfig.h` — kernel config for this target
-- `Lab-special-problem-3/Middlewares/FreeRTOS/` — vendored kernel source (hand-added, not CubeMX-generated)
-- `Lab-special-problem-3/tests/test_rtos_step1.py` — proves vMainTask body == original loop body
-- `builds/v65-rtos-step1/`, `builds/v66-rtos-step3a/`, `builds/v66b-rtos-step3a-fix/` — full snapshots of each attempt, including the two broken ones (kept for when step 3 is retried)
-- `Designs/2026-10-20-freertos-refactor.md` — the approved plan this work follows
+- `Core/Src/main.c` — application, task, mutex
+- `Core/Src/stm32f7xx_it.c` — SysTick: `HAL_IncTick` always, kernel tick only after scheduler start
+- `Core/Src/freertos_hooks.c` — stack-overflow hook (required by the config; was missing from the v65 commit)
+- `Core/Inc/FreeRTOSConfig.h`, `Middlewares/FreeRTOS/` — kernel (vendored by hand, not CubeMX)
+- `tests/test_rtos_step3a.py`, `tests/_unlock.py` — mutex rules; `_unlock` lets older text-based tests ignore the lock wrappers

@@ -4,7 +4,13 @@ import re, subprocess, os
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__import__('tempfile').gettempdir()) / 'osc_regression'
 OUT.mkdir(parents=True, exist_ok=True)
-s = re.sub(r'/\*.*?\*/', '', (ROOT/'Core/Src/main.c').read_text(), flags=re.S)
+raw_src = (ROOT/'Core/Src/main.c').read_text()
+try:
+    import _unlock
+    raw_src = _unlock.unlock(raw_src)
+except ImportError:
+    pass
+s = re.sub(r'/\*.*?\*/', '', raw_src, flags=re.S)
 def function(name):
     m = re.search(r'^(?:static\s+)?(?:inline\s+)?(?:void|int|float|uint8_t|uint32_t)\s+(?:FAST_O2\s+)?'+name+r'\([^;]*?\)\s*\{', s, re.M)
     assert m, name
@@ -19,6 +25,9 @@ pre = '''#include <stdint.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#define OSC_VDIV_DEF 3
+#define OSC_EXT_STUB 1
+static int OscExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v76: no outside points in this harness -> fallback edge rule */
 #define ADC_INPUT_ENABLE 1
 #define N_SAMPLES 240
 #define ADC_PRE_POINTS 200

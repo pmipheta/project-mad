@@ -6,7 +6,8 @@ import re, subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_eightbtn'; OUT.mkdir(parents=True, exist_ok=True)
 from rtos_norm import unrtos
-src = unrtos((ROOT/'Core/Src/main.c').read_text())
+from _unlock import unlock
+src = unrtos(unlock((ROOT/'Core/Src/main.c').read_text()))   # v71: undo the step-3a lock wrappers before the 'unchanged' checks
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 def function(name):
     m = re.search(r'^(?:static\s+)?(?:void|int|float|uint8_t|const char\s*\*)\s*'+name+r'\([^;]*?\)\s*\{', nocom, re.M)
@@ -220,7 +221,7 @@ if bt:
     for f in ['ActAuto','ActUp','ActDown','ActFreeze','ActToggleFastSlow','ActAutoMode','ActToggleMoveAxis','ActMoveCenter','OscAdjust','OscSetIndex','ButtonRepeat','ButtonJustPressed']:
         checks.append((f+' body unchanged', body(src,f)==body(bt,f)))
     added = [l for l in __import__('difflib').unified_diff(bt.splitlines(), src.splitlines(), lineterm='', n=0) if l.startswith(('+','-')) and not l.startswith(('+++','---'))]
-    checks.append(('diff vs v61 small (<=120 changed lines)', len(added)<=120))
+    checks.append(('diff vs v61 bounded (<=170 changed lines; grew with v72 header format, v73 V/DIV table, v74-v76 filter/grid): %d' % len(added), len(added)<=170))
     print('diff changed lines vs v61:', len(added))
 def hb(t): return body(t,'HandleButtons')
 mb = re.search(r"case 'm': \{.*?\n        \}", re.sub(r'/\*.*?\*/','',body(src,'UartCommand'),flags=re.S), re.S)[0] if False else None
@@ -246,3 +247,5 @@ for n, ok in checks:
     print(('PASS ' if ok else 'FAIL ')+n); cfail += (not ok)
 print('contract failures=%d' % cfail)
 print('eightbtn total failures=%d' % (rr.returncode + cfail))
+import sys
+sys.exit(1 if (rr.returncode + cfail) else 0)

@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +58,7 @@
 #define ADC_INPUT_ENABLE   1
 #define ADC_RAW_MAX        65520u  /* <=16-bit NDTR; whole 32-byte cache lines */
 #define OSC_NT             18       /* number of T/DIV (12 FAST + 6 SLOW) */
+#define OSC_VDIV_DEF      12       /* index of 1.0 V/div in osc_vdivs[] */
 #define OSC_TDIV_DEF       8        /* index ของ 1.0 ms/div = ค่าเริ่มต้น */
 #define OSC_NT_FAST        12       /* T/DIV 0..11 = FAST (burst DMA); 12..17 = SLOW (history, SysTick) */
 #define ADC_SAMPLETIME_FAST ADC_SAMPLETIME_3CYCLES /* 12 MHz / 15 = 800 kSa/s */
@@ -96,6 +98,11 @@
 #define GRID_Y_STEP     40           /* px between horizontal grid lines        */
 #define GRID_Y_OFFSET   0            /* grid rows y=40,80,120,...: row 120 = CENTER_Y (0 V) */
 #define GRID_X_DOT      6            /* horizontal dot spacing                  */
+#define GRID_X_STEP     32           /* v75: px between vertical grid lines = 1 T/DIV (SCREEN_W 320 / OSC_H_DIVS 10) */
+#define GRID_V_DOT      4            /* v75: dot spacing along the vertical (time) lines */
+/* v75: ONE rule for "this pixel is a grid dot" (horizontal V/DIV rows + vertical T/DIV lines); every draw/erase path uses it */
+#define IS_GRID_DOT(x, y) ((((y) % GRID_Y_STEP == GRID_Y_OFFSET) && ((x) % GRID_X_DOT == 0)) || \
+                           (((y) >= WAVEFORM_TOP) && ((x) % GRID_X_STEP == 0) && ((y) % GRID_V_DOT == 0)))
 
 /* --- ADC reference --------------------------------------------------------- */
 #define ADC_MID         2048         /* 12-bit midpoint (= 0 V after bias)     */
@@ -171,6 +178,21 @@ volatile uint8_t new_frame_ready = 0;     /* teammate sets 1 when buffer ready *
 
 /* --- Measurement results (teammate writes here) ---------------------------- */
 volatile OscMeasure osc_meas = {0};
+
+/* --- v66 step 3a: mutex around the oscilloscope state shared between future tasks -------------------------------
+ * Protected: osc_meas, osc_sidx, hold_active, osc_dirty, osc_stable, osc_auto_tb.  Plain (non-recursive) mutex: every
+ * critical section is a strict leaf (no lock is ever taken while held).  NEVER use from an ISR (OscSlowTick etc.). */
+static SemaphoreHandle_t xOscMutex;
+#define OSC_LOCK()    ((void)xSemaphoreTake(xOscMutex, portMAX_DELAY))
+#define OSC_UNLOCK()  ((void)xSemaphoreGive(xOscMutex))
+#define OSC_SET(v, x) do { OSC_LOCK(); (v) = (x); OSC_UNLOCK(); } while (0)
+static void OscMeasGet(OscMeasure *o)
+{
+    OSC_LOCK();
+    o->vmax = osc_meas.vmax; o->vmin = osc_meas.vmin; o->vpp = osc_meas.vpp;
+    o->vrms = osc_meas.vrms; o->freq = osc_meas.freq; o->dc_offset = osc_meas.dc_offset;
+    OSC_UNLOCK();
+}
 
 /* --- Display double-buffer ------------------------------------------------- */
 static int16_t old_y[N_SAMPLES];
@@ -287,7 +309,10 @@ volatile uint32_t prof_us[8];   /* PROFILING (us): 0 capture, 1 process+measure+
 #define OSC_PUSH        8           /* sample ใหม่ต่อเฟรม (คุมความเร็วไถล) */
 
 static const char  *gen_wave_names[]  = {"SINE", "SQUARE", "TRI", "SAW"};
-static const float  osc_vdivs[]       = {0.1f, 0.2f, 0.5f, 1.0f, 2.0f};
+static const float  osc_vdivs[]       = {0.0001f, 0.0002f, 0.0005f,
+                                          0.001f,  0.002f,  0.005f,
+                                          0.01f,   0.02f,   0.05f,
+                                          0.1f,    0.2f,    0.5f, 1.0f, 2.0f};
 static const float  osc_tdivs_ms[]    = {0.005f, 0.01f, 0.015f, 0.02f, 0.05f, 0.1f, 0.2f, 0.5f, 1.0f, 2.0f, 5.0f, 6.0f,
                                          10.0f, 20.0f, 50.0f, 100.0f, 200.0f, 500.0f};   /* 0.015 ms/div = raw ADC samples (1.6 MSa/s); 10..500 ms/div = SLOW mode (10/20 ms/div: 30-100 Hz with 3-6 cycles instead of 15) */
 static const char  *osc_set_names[]   = {"FILTER", "TRIG", "V/DIV", "T/DIV"};
@@ -302,7 +327,7 @@ static float    gen_noise     = 0.05f;     /* 0 .. 0.3 V                       *
 static float    gen_ph        = 0.0f;      /* เฟสสะสม (roll)                    */
 
 /* --- oscilloscope settings --- */
-static int      osc_vdiv_i    = 3;         /* -> 1.0 V/div                     */
+static int      osc_vdiv_i    = OSC_VDIV_DEF; /* -> 1.0 V/div; table reaches 0.0001 V/div */
 static int      osc_tdiv_i    = OSC_TDIV_DEF;  /* -> 1.0 ms/div                */
 static int      osc_fwin      = 5;         /* moving average window (1..21 คี่) */
 static int      osc_trig_fall = 0;         /* 0 = rising, 1 = falling          */
@@ -427,6 +452,7 @@ static void UartInputInit(void)
  * ค่าโวลต์หลัง calibrate (AC coupling) + moving average filter
  * ทำงานเหมือน calibrate_offset() + moving_average_filter() ของ simulator
  * -------------------------------------------------------------------------- */
+static int OscExtPoint(int k, float *v);   /* v76: real display point k (<0 or >=N_SAMPLES) of THIS FAST frame; defined in MOVE_DATA */
 static void OscProcessFrame(void)
 {
     const float k = ADC_VREF / (float)ADC_FULL;
@@ -464,15 +490,46 @@ static void OscProcessFrame(void)
     for (int i = 0; i < N_SAMPLES; i++) {
         if (win <= 1) {
             osc_v[i] = ((float)raw_samples[i] - osc_offset_ct) * k;
-        } else {
+        }
+    }
+    if (win > 1) {
+        /* Middle: the same centred moving average as before. */
+        float flo = 1e9f, fhi = -1e9f, rlo = 1e9f, rhi = -1e9f;
+        for (int i = half; i < N_SAMPLES - half; i++) {
             float acc = 0.0f;
-            for (int j = -half; j <= half; j++) {
+            for (int j = -half; j <= half; j++) acc += (float)raw_samples[i + j];
+            acc /= (float)win;
+            osc_v[i] = (acc - osc_offset_ct) * k;
+            if (acc < flo) flo = acc;
+            if (acc > fhi) fhi = acc;
+            if (raw_samples[i] < rlo) rlo = (float)raw_samples[i];
+            if (raw_samples[i] > rhi) rhi = (float)raw_samples[i];
+        }
+        /* v74/v76 edges (the first/last `half` points have no on-screen neighbour on one side).  The old clamp
+         * repeated sample 0 / 239, so the edge points stayed almost unfiltered and stood out as spikes whenever the
+         * filter visibly smooths the middle (2 MHz, 500 kHz, ...).
+         *  1. FAST: the capture keeps the real display points just outside the window (mv_ext_lo/hi, same
+         *     resampling as raw_samples) -> the edge point gets the SAME centred filter as the middle. Exact.
+         *  2. no outside data (SLOW, sim): if the filter changes the middle by > 10 % slide the window inward
+         *     (edge averages `win` real samples like the middle -> no spike), else shrink the centred window. */
+        uint8_t crushed = (fhi - flo) < 0.9f * (rhi - rlo);
+        for (int e = 0; e < 2 * half; e++) {
+            int i = (e < half) ? e : (N_SAMPLES - 2 * half + e);
+            float acc = 0.0f, ev;
+            int j, ok = 1;
+            for (j = -half; j <= half; j++) {
                 int m = i + j;
-                if (m < 0) m = 0;
-                if (m >= N_SAMPLES) m = N_SAMPLES - 1;
-                acc += (float)raw_samples[m];
+                if (m >= 0 && m < N_SAMPLES) acc += (float)raw_samples[m];
+                else if (OscExtPoint(m, &ev)) acc += ev;
+                else { ok = 0; break; }
             }
-            osc_v[i] = (acc / (float)win - osc_offset_ct) * k;
+            if (ok) { osc_v[i] = (acc / (float)win - osc_offset_ct) * k; continue; }
+            int a, n;
+            if (crushed) { a = (i < half) ? 0 : (N_SAMPLES - win); n = win; }
+            else         { int hh = (i < half) ? i : (N_SAMPLES - 1 - i); a = i - hh; n = 2 * hh + 1; }
+            acc = 0.0f;
+            for (int m = a; m < a + n; m++) acc += (float)raw_samples[m];
+            osc_v[i] = (acc / (float)n - osc_offset_ct) * k;
         }
     }
 }
@@ -540,6 +597,7 @@ static void OscMeasureFrame(void)
         peak = (fabsf(vmax) > fabsf(vmin)) ? fabsf(vmax) : fabsf(vmin);
     }
 #endif
+    OSC_LOCK();
     osc_meas.vmax = vmax;
     osc_meas.vmin = vmin;
     osc_meas.vpp  = vmax - vmin;
@@ -557,6 +615,7 @@ static void OscMeasureFrame(void)
 #if ADC_INPUT_ENABLE
     osc_meas.freq = osc_frame_valid ? osc_raw_freq : 0.0f;
 #endif
+    OSC_UNLOCK();
 #if ADC_INPUT_ENABLE
     /* v52: analog input bandwidth compensation.  The ADC input (source resistance + sample-and-hold capacitor) acts as
      * a one-pole low-pass at about ADC_INPUT_FC: measured on the board, 2.1 MHz read 0.87 V for a ~1.93 V signal.
@@ -564,6 +623,7 @@ static void OscMeasureFrame(void)
      * scaled back by the known filter gain at the measured frequency.  Below ~100 kHz the factor is < 1.005 (no change);
      * SLOW mode frequencies (< 100 Hz) give exactly 1.  Only osc_meas (screen/UART) is scaled - the raw values used by
      * auto time base, hold and trigger logic are untouched. */
+    OSC_LOCK();
     {
         float g = 1.0f;
         if (osc_meas.freq > 0.0f) {
@@ -575,6 +635,7 @@ static void OscMeasureFrame(void)
         osc_meas.vmax *= g; osc_meas.vmin *= g; osc_meas.vpp *= g; osc_meas.vrms *= g;
         peak *= g;
     }
+    OSC_UNLOCK();
 #endif
     if (peak < 0.001f) {
         strcpy(osc_det, "---");
@@ -660,8 +721,8 @@ static void OscSetValueText(char *out, int n)   /* "FILTER:5" / "TRIG:RISE" ... 
     const char *name = OscSetName();
     if      (!strcmp(name, "FILTER")) snprintf(out, n, "FILT:%d", osc_fwin);
     else if (!strcmp(name, "TRIG"))   snprintf(out, n, "TRIG:%s", osc_trig_fall ? "FALL" : "RISE");
-    else if (!strcmp(name, "V/DIV"))  snprintf(out, n, "VDIV:%.1f", (double)osc_vdivs[osc_vdiv_i]);
-    else if (!strcmp(name, "T/DIV"))  snprintf(out, n, "TDIV:%.1f", (double)osc_tdivs_ms[osc_tdiv_i]);
+    else if (!strcmp(name, "V/DIV"))  snprintf(out, n, "V:%.4f", (double)osc_vdivs[osc_vdiv_i]);
+    else if (!strcmp(name, "T/DIV"))  snprintf(out, n, "T:%.4f", (double)osc_tdivs_ms[osc_tdiv_i]);
     else if (!strcmp(name, "C1"))     snprintf(out, n, "C1:%d", osc_c1);
     else if (!strcmp(name, "C2"))     snprintf(out, n, "C2:%d", osc_c2);
     else                              snprintf(out, n, "--");
@@ -669,8 +730,8 @@ static void OscSetValueText(char *out, int n)   /* "FILTER:5" / "TRIG:RISE" ... 
 
 static void OscSetIndex(int idx)
 {
-    osc_sidx = idx % OscSetCount();
-    if (osc_sidx < 0) osc_sidx = 0;
+    OSC_SET(osc_sidx, idx % OscSetCount());
+    if (osc_sidx < 0) OSC_SET(osc_sidx, 0);
 }
 
 static void OscAdjust(int dir)      /* dir = +1 / -1 */
@@ -689,13 +750,13 @@ static void OscAdjust(int dir)      /* dir = +1 / -1 */
     } else if (!strcmp(name, "T/DIV")) {
         osc_tdiv_i = OscClampI(osc_tdiv_i + dir, 0, (int)(sizeof(osc_tdivs_ms) / sizeof(float)) - 1);
         /* New timebase takes effect only on the next capture. */
-        osc_auto_tb = 0;            /* manual choice wins until 'z' (AutoScale) re-arms AUTO */
+        OSC_SET(osc_auto_tb, 0);            /* manual choice wins until 'z' (AutoScale) re-arms AUTO */
     } else if (!strcmp(name, "C1")) {
         osc_c1 = OscClampI(osc_c1 + dir * 5, 0, N_SAMPLES - 1);
     } else if (!strcmp(name, "C2")) {
         osc_c2 = OscClampI(osc_c2 + dir * 5, 0, N_SAMPLES - 1);
     }
-    osc_dirty = 1;                  /* ให้วาดใหม่แม้อยู่ใน HOLD */
+    OSC_SET(osc_dirty, 1);                  /* ให้วาดใหม่แม้อยู่ใน HOLD */
 }
 
 /* --------------------------------------------------------------------------
@@ -723,7 +784,7 @@ static void OscAutoScale(void)
     osc_auto_stage = 1;
     /* v56: one-shot. 'z' does not touch osc_auto_tb (continuous auto time base only via 'A') */
     osc_auto_tries = 0;
-    osc_dirty = 1;
+    OSC_SET(osc_dirty, 1);
     UartPrint("\r\n AutoScale...\r\n");
 }
 
@@ -835,7 +896,7 @@ static void AtbSwitch(int ti)
     atb_t_flat   = 0;
     atb_t_unread = 0;
     atb_cand_n   = 0;
-    osc_dirty    = 1;
+    OSC_SET(osc_dirty   , 1);
     dbg_atb_switches++;
 }
 
@@ -933,7 +994,7 @@ static void OscManualToggle(void)
 {
     int ti;
     float pf = 0.0f;
-    osc_auto_tb = 0;
+    OSC_SET(osc_auto_tb, 0);
     if (!slow_active) {                                       /* FAST -> SLOW */
         ti = AtbProbeSlow(-1, &pf);
         if (ti >= 0)                                  ti = AtbPickSlow(pf);
@@ -947,10 +1008,10 @@ static void OscManualToggle(void)
 
 static void OscAutoRearm(void)
 {
-    osc_auto_tb  = 1;
+    OSC_SET(osc_auto_tb , 1);
     atb_t_switch = HAL_GetTick();
     atb_t_bad    = 0;
-    osc_dirty    = 1;
+    OSC_SET(osc_dirty   , 1);
 }
 /* AUTO_TB_END ============================================================== */
 
@@ -975,7 +1036,7 @@ static void MvReset(void)                    /* offsets back to zero: the pictur
 {
     mv_y_steps = 0; mv_x_pts = 0; mv_view_on = 0;
     mv_zoom_x = 1; mv_zoom_y = 1; mv_zoom_step = 0; mv_x_q = 0;      /* v57: zoom back to x1 */
-    osc_dirty = 1;
+    OSC_SET(osc_dirty, 1);
 }
 
 static void MvSync(void)                     /* freeze / unfreeze edge: called from every Act*() and once per main-loop pass */
@@ -1011,21 +1072,18 @@ static void ActZoom(int dir)                 /* '+' (dir +1) / '-' (dir -1): onl
         }
         MvBuildView();
     }
-    osc_dirty = 1;
+    OSC_SET(osc_dirty, 1);
 }
 
-static void MvFmtT(char *b, int n, float t_ms)       /* header T field: effective T/DIV (T/DIV / zoom) */
+static void MvFmtT(char *b, int n, float t_ms)       /* header T field: effective T/DIV (T/DIV / zoom), 4 decimals */
 {
-    if (t_ms < 0.1f)       snprintf(b, (size_t)n, "T:%.2fus/d", (double)(t_ms * 1000.0f));
-    else if (t_ms < 1.0f)  snprintf(b, (size_t)n, "T:%.3fms/d", (double)t_ms);
-    else if (t_ms < 10.0f) snprintf(b, (size_t)n, "T:%.2fms/d", (double)t_ms);
-    else                   snprintf(b, (size_t)n, "T:%.1fms/d", (double)t_ms);
+    if (t_ms < 0.1f) snprintf(b, (size_t)n, "T:%.4fus", (double)(t_ms * 1000.0f));
+    else             snprintf(b, (size_t)n, "T:%.4fms", (double)t_ms);
 }
 
-static void MvFmtV(char *b, int n, float v)          /* header V field: effective V/DIV (V/DIV / zoom) */
+static void MvFmtV(char *b, int n, float v)          /* header V field: effective V/DIV (V/DIV / zoom), 4 decimals */
 {
-    if (v < 1.0f) snprintf(b, (size_t)n, "V:%.1fmV/d", (double)(v * 1000.0f));
-    else          snprintf(b, (size_t)n, "V:%.2fV/d", (double)v);
+    snprintf(b, (size_t)n, "V:%.4fV", (double)v);
 }
 
 static void MvFmtZ(char *b, int n)                   /* header Z field */
@@ -1049,26 +1107,26 @@ static void MvMove(int dir, int n)           /* dir +1 = UP / LEFT, -1 = DOWN / 
         int p = OscClampI(mv_x_pts - dir * n * MV_X_STEP_PTS, mv_x_min, mv_x_max);
         if (p != mv_x_pts) { mv_x_pts = p; MvBuildView(); }
     }
-    osc_dirty = 1;
+    OSC_SET(osc_dirty, 1);
 }
 
 static void ActToggleStable(void)            /* v63: PC3 short / PF3 = same as UART 'm' bare toggle */
 {
-    osc_stable = (uint8_t)!osc_stable;
-    osc_dirty  = 1;
+    OSC_SET(osc_stable, (uint8_t)!osc_stable);
+    OSC_SET(osc_dirty , 1);
 }
 
 static void ActFreeze(void)                  /* FREEZE button / 'h' */
 {
-    hold_active = !hold_active;
-    osc_sidx    = 0;
-    osc_dirty   = 1;
+    OSC_SET(hold_active, !hold_active);
+    OSC_SET(osc_sidx   , 0);
+    OSC_SET(osc_dirty  , 1);
     MvSync();
 }
 
 static void ActAuto(void)                    /* AUTO button / 'z': unfreeze, offsets to zero, auto scale */
 {
-    if (hold_active) { hold_active = 0; osc_sidx = 0; }
+    if (hold_active) { OSC_SET(hold_active, 0); OSC_SET(osc_sidx, 0); }
     MvSync();
     MvReset();
     AutoScale();                             /* = OscAutoScale() */
@@ -1118,13 +1176,13 @@ static void ActSelectSetting(const char *name)
 static void ActToggleTrigEdge(void)
 {
     osc_trig_fall = !osc_trig_fall;
-    osc_dirty = 1;
+    OSC_SET(osc_dirty, 1);
 }
 
 static void ActToggleMoveAxis(void)          /* 'x' */
 {
     mv_axis_x = (uint8_t)!mv_axis_x;
-    osc_dirty = 1;
+    OSC_SET(osc_dirty, 1);
 }
 
 static void ActMoveCenter(void)              /* '0' */
@@ -1160,7 +1218,7 @@ static int OscAutoPickTdiv(float f)
 
 static void OscAutoApply(float vpp, int ti)
 {
-    int vi = 3;                                           /* default 1 V/div */
+    int vi = OSC_VDIV_DEF;                               /* default 1 V/div */
     if (vpp >= AS_MIN_VPP) {
         vi = (int)(sizeof(osc_vdivs) / sizeof(osc_vdivs[0])) - 1;
         for (int i = 0; i <= vi; i++) { if (osc_vdivs[i] * OSC_V_FILL_DIVS >= vpp) { vi = i; break; } }
@@ -1169,7 +1227,7 @@ static void OscAutoApply(float vpp, int ti)
     volts_per_div = osc_vdivs[vi];
     osc_tdiv_i = ti; /* captured time metadata changes only on acquisition */
     osc_auto_stage = 0;
-    osc_dirty = 1;
+    OSC_SET(osc_dirty, 1);
 }
 
 static void OscAutoScaleStep(void)
@@ -1185,7 +1243,7 @@ static void OscAutoScaleStep(void)
     /* no periodic reading (yet) */
     if (osc_auto_tries < 250u) osc_auto_tries++;
     if (slow_active && vpp < AS_MIN_VPP) { OscAutoApply(0.0f, OSC_TDIV_DEF); return; }    /* the SLOW window is flat: no signal */
-    if (!slow_active && osc_auto_tries == 15u) { osc_tdiv_i = OSC_NT_FAST + 4; osc_dirty = 1; }   /* FAST sees only >= 40 Hz: look at the SLOW 200 ms/div window (2 s) */
+    if (!slow_active && osc_auto_tries == 15u) { osc_tdiv_i = OSC_NT_FAST + 4; OSC_SET(osc_dirty, 1); }   /* FAST sees only >= 40 Hz: look at the SLOW 200 ms/div window (2 s) */
     else if (slow_active && osc_auto_tries > 100u) OscAutoApply(vpp, OSC_TDIV_DEF);        /* not periodic: scale V/DIV, default FAST time base */
 }
 /* MOVE_END ================================================================= */
@@ -1198,9 +1256,9 @@ static void UartPanel(void)
     UartPrint("\r\n Setting: "); UartPrint(b);
     for (int i = 0; i < OscSetCount(); i++) {
         int save = osc_sidx;
-        osc_sidx = i;
+        OSC_SET(osc_sidx, i);
         OscSetValueText(b, sizeof(b));
-        osc_sidx = save;
+        OSC_SET(osc_sidx, save);
         UartPrint((i == osc_sidx) ? "\r\n  > " : "\r\n    ");
         UartPrint(b);
     }
@@ -1230,10 +1288,11 @@ static void UartPanel(void)
 
     UartPrint("\r\n== MEASUREMENTS ==============================");
     if (!osc_frame_valid) UartPrint("\r\n ADC ERR: measurements invalid; retrying acquisition");
-    UartNum("\r\n Vmax:", osc_meas.vmax, " V");  UartNum("   Vmin:", osc_meas.vmin, " V");
-    UartNum("\r\n Vpp: ", osc_meas.vpp,  " V");  UartNum("   RMS: ", osc_meas.vrms, " V");
-    UartNum("\r\n DC:  ", osc_meas.dc_offset, " V");
-    snprintf(b, sizeof(b), "   Freq: %d Hz", (int)(osc_meas.freq + 0.5f));   /* p44: ปัด */
+    OscMeasure sm; OscMeasGet(&sm);   /* consistent snapshot for the readout */
+    UartNum("\r\n Vmax:", sm.vmax, " V");  UartNum("   Vmin:", sm.vmin, " V");
+    UartNum("\r\n Vpp: ", sm.vpp,  " V");  UartNum("   RMS: ", sm.vrms, " V");
+    UartNum("\r\n DC:  ", sm.dc_offset, " V");
+    snprintf(b, sizeof(b), "   Freq: %d Hz", (int)(sm.freq + 0.5f));   /* p44: ปัด */
     UartPrint(b);
     if (hold_active) {
         UartNum("\r\n U1:", MvShownV(osc_c1 + osc_plot_offset), " V");  UartNum("   U2:", MvShownV(osc_c2 + osc_plot_offset), " V");
@@ -1281,7 +1340,7 @@ static void UartCommand(char *line)
         case 'A': ActAutoMode(); break;                                 /* automatic FAST/SLOW again (upper case: 'a' is the generator amplitude) */
         case 'g':                                                       /* gen ใหม่ */
             gen_ph = fmodf(gen_ph + 1.7f, 6.28318531f);                  /* = reseed */
-            osc_dirty = 1;
+            OSC_SET(osc_dirty, 1);
             break;
         case 'w':                                                       /* waveform */
             if (has) {
@@ -1297,18 +1356,18 @@ static void UartCommand(char *line)
             } else {
                 gen_wave = (gen_wave + 1) % 4;
             }
-            osc_dirty = 1;
+            OSC_SET(osc_dirty, 1);
             break;
-        case 'f': gen_freq  = OscClampF(has ? UartArgF(arg, gen_freq) : gen_freq + 100.0f, 100.0f, 5000.0f); osc_dirty = 1; break;
-        case 'a': gen_amp   = OscClampF(has ? UartArgF(arg, gen_amp)  : gen_amp  + 0.05f, 0.10f, 1.50f); osc_dirty = 1; break;
-        case 'o': gen_dc    = OscClampF(has ? UartArgF(arg, gen_dc)   : gen_dc   + 0.05f, 0.50f, 2.50f); osc_dirty = 1; break;
-        case 'n': gen_noise = OscClampF(has ? UartArgF(arg, gen_noise): gen_noise+ 0.005f, 0.0f, 0.30f); osc_dirty = 1; break;
+        case 'f': gen_freq  = OscClampF(has ? UartArgF(arg, gen_freq) : gen_freq + 100.0f, 100.0f, 5000.0f); OSC_SET(osc_dirty, 1); break;
+        case 'a': gen_amp   = OscClampF(has ? UartArgF(arg, gen_amp)  : gen_amp  + 0.05f, 0.10f, 1.50f); OSC_SET(osc_dirty, 1); break;
+        case 'o': gen_dc    = OscClampF(has ? UartArgF(arg, gen_dc)   : gen_dc   + 0.05f, 0.50f, 2.50f); OSC_SET(osc_dirty, 1); break;
+        case 'n': gen_noise = OscClampF(has ? UartArgF(arg, gen_noise): gen_noise+ 0.005f, 0.0f, 0.30f); OSC_SET(osc_dirty, 1); break;
         case 'v': OscSetIndex(2); OscAdjust((arg && *arg == '-') ? -1 : +1); break;
         case 't': OscSetIndex(3); OscAdjust((arg && *arg == '-') ? -1 : +1); break;
         case 'c':
             if (tok[1] == '1' || tok[1] == '2') {
                 int ci = (tok[1] == '1') ? 1 : 2;
-                osc_sidx = hold_active ? (ci == 1 ? 0 : 1) : osc_sidx;
+                OSC_SET(osc_sidx, hold_active ? (ci == 1 ? 0 : 1) : osc_sidx);
                 if (has) {
                     int v = OscClampI(atoi(arg), 0, N_SAMPLES - 1);
                     if (ci == 1) osc_c1 = v; else osc_c2 = v;
@@ -1316,19 +1375,19 @@ static void UartCommand(char *line)
             } else if (tok[1] == 'a') {                                 /* cal 0/1 */
                 osc_calib = (uint8_t)(has ? atoi(arg) : !osc_calib);
             }
-            osc_dirty = 1;
+            OSC_SET(osc_dirty, 1);
             break;
         case 'm': {                                                     /* โหมดจอ */
             const char *a = has ? arg : tok + 1;       /* "m a" | "ma" | "m" */
             if (*a) {
                 char a0 = (a[0] >= 'A' && a[0] <= 'Z') ? (char)(a[0] + 32) : a[0];
-                if      (a0 == 'a') osc_stable = 1;                  /* auto = นิ่ง  */
-                else if (a0 == 'r') osc_stable = 0;                  /* roll = ไถล   */
-                else                osc_stable = (uint8_t)(atoi(a) ? 1 : 0);
+                if      (a0 == 'a') OSC_SET(osc_stable, 1);                  /* auto = นิ่ง  */
+                else if (a0 == 'r') OSC_SET(osc_stable, 0);                  /* roll = ไถล   */
+                else                OSC_SET(osc_stable, (uint8_t)(atoi(a) ? 1 : 0));
             } else {
-                osc_stable = (uint8_t)!osc_stable;
+                OSC_SET(osc_stable, (uint8_t)!osc_stable);
             }
-            osc_dirty = 1;
+            OSC_SET(osc_dirty, 1);
             break;
         }
         case 'z': case 'Z': ActAuto(); break;                            /* auto scale */
@@ -1442,6 +1501,7 @@ static void SimUpdateMeasure(void)
         prev = v;
     }
 
+    OSC_LOCK();
     osc_meas.vmax = vmax;
     osc_meas.vmin = vmin;
     osc_meas.vpp  = vmax - vmin;
@@ -1451,6 +1511,7 @@ static void SimUpdateMeasure(void)
         float span = cross[ncross - 1] - cross[0];
         if (span > 0.0f) osc_meas.freq = (float)(ncross - 1) / span;
     }
+    OSC_UNLOCK();
 }
 
 static void SimSamplingStream(void)
@@ -1509,12 +1570,14 @@ static void GenerateFakeSineWave(void)
 
     /* Mock measurements — teammate replaces these with real calculations */
     float peak_v = 1800.0f * ADC_VREF / (float)ADC_FULL;  /* ~1.45 V */
+    OSC_LOCK();
     ((OscMeasure *)&osc_meas)->vmax     =  peak_v;
     ((OscMeasure *)&osc_meas)->vmin     = -peak_v;
     ((OscMeasure *)&osc_meas)->vpp      =  peak_v * 2.0f;
     ((OscMeasure *)&osc_meas)->vrms     =  peak_v * 0.7071f;
     ((OscMeasure *)&osc_meas)->freq     =  1000.0f;
     ((OscMeasure *)&osc_meas)->dc_offset = 0.0f;
+    OSC_UNLOCK();
 }
 
 /* --------------------------------------------------------------------------
@@ -1572,6 +1635,10 @@ static void DrawGrid(void)
     for (int y = GRID_Y_OFFSET; y < SCREEN_H; y += GRID_Y_STEP)
         for (int x = 0; y >= WAVEFORM_TOP && x < SCREEN_W; x += GRID_X_DOT)
             ILI9341_Draw_Pixel((uint16_t)x, (uint16_t)y, DARKGREY);
+    /* v75: vertical dotted line every 1 T/DIV */
+    for (int x = 0; x < SCREEN_W; x += GRID_X_STEP)
+        for (int y = WAVEFORM_TOP; y < SCREEN_H; y++)
+            if (IS_GRID_DOT(x, y)) ILI9341_Draw_Pixel((uint16_t)x, (uint16_t)y, DARKGREY);
 }
 
 /* --------------------------------------------------------------------------
@@ -1598,7 +1665,7 @@ static void DrawLineBresenham(int x0, int y0, int x1, int y1, uint16_t color)
                 draw_color = YELLOW;
             } else if (x0 == (int)cursor_x && y0 >= WAVEFORM_TOP) {
                 draw_color = DARKCYAN;
-            } else if ((y0 % GRID_Y_STEP == GRID_Y_OFFSET) && (x0 % GRID_X_DOT == 0)) {
+            } else if (IS_GRID_DOT(x0, y0)) {
                 draw_color = DARKGREY;
             }
         }
@@ -1643,8 +1710,7 @@ static void ClearCursors(void)
         int x = k ? cur_x2 : cur_x1;
         if (x < 0) continue;
         for (int y = WAVEFORM_TOP; y < SCREEN_H; y++) {
-            uint16_t col = (((y % GRID_Y_STEP) == GRID_Y_OFFSET) && ((x % GRID_X_DOT) == 0))
-                           ? DARKGREY : BLACK;
+            uint16_t col = IS_GRID_DOT(x, y) ? DARKGREY : BLACK;
             ILI9341_Draw_Pixel((uint16_t)x, (uint16_t)y, col);
         }
     }
@@ -1704,7 +1770,7 @@ static uint16_t BackgroundColour(int x, int y)       /* what is on the screen wh
 {
     if (hold_active && (x == OscCursorX(osc_c1) || x == OscCursorX(osc_c2))) return YELLOW;
     if (x == (int)cursor_x && y >= WAVEFORM_TOP) return DARKCYAN;
-    if ((y % GRID_Y_STEP == GRID_Y_OFFSET) && (x % GRID_X_DOT == 0)) return DARKGREY;
+    if (IS_GRID_DOT(x, y)) return DARKGREY;
     return BLACK;
 }
 
@@ -1829,6 +1895,7 @@ static void HdrText(int id, const char *t, uint8_t x, uint8_t y, uint16_t fg, ui
 static void DrawTopPanel(void)
 {
     char buf[20];
+    OscMeasure tm; OscMeasGet(&tm);   /* one consistent snapshot of osc_meas for the whole header */
     /* The header is NOT cleared every update any more (that blanked every number for ~60 ms, 3 times a second = the blinking F:/Vp:
      * values). Each text keeps what is on the screen; only the characters that changed are redrawn. A change between the normal
      * and the HOLD layout clears the header once. */
@@ -1845,15 +1912,12 @@ static void DrawTopPanel(void)
     int sel_vdiv = (strcmp(selname, "V/DIV") == 0);
     int sel_tdiv = (strcmp(selname, "T/DIV") == 0);
 
-    /* V/div — x=2 (MAGENTA = กำลังปรับตัวนี้อยู่) */
-    if (hold_active && mv_zoom_y > 1) MvFmtV(buf, sizeof(buf), volts_per_div / (float)mv_zoom_y);   /* v57: effective V/DIV while zoomed */
-    else snprintf(buf, sizeof(buf), "V:%.1fV/d", (double)volts_per_div);
+    /* V/div — x=2 (MAGENTA = กำลังปรับตัวนี้อยู่), always 4 decimals */
+    MvFmtV(buf, sizeof(buf), (hold_active && mv_zoom_y > 1) ? volts_per_div / (float)mv_zoom_y : volts_per_div);
     HDRT(buf, 2, 1, sel_vdiv ? (blink_on ? MAGENTA : YELLOW) : YELLOW, 1, BLACK);
 
-    /* T/div label — x=72 */
-    if (hold_active && mv_zoom_x > 1) MvFmtT(buf, sizeof(buf), osc_capture_tdiv / (float)mv_zoom_x);   /* v57: effective T/DIV while zoomed */
-    else if (osc_capture_tdiv < 0.1f) snprintf(buf, sizeof(buf), "T:%.0fus/d ", (double)(osc_capture_tdiv * 1000.0f));   /* 5/10/15/20/50 us */
-    else                         snprintf(buf, sizeof(buf), "T:%.1fms/d", (double)osc_capture_tdiv);
+    /* T/div label — x=72, always 4 decimals */
+    MvFmtT(buf, sizeof(buf), (hold_active && mv_zoom_x > 1) ? osc_capture_tdiv / (float)mv_zoom_x : osc_capture_tdiv);
     HDRT(buf, 72, 1, sel_tdiv ? (blink_on ? MAGENTA : WHITE) : WHITE, 1, BLACK);
 
     /* Setting ที่กำลังปรับ (SET เลือก, UP/DOWN เปลี่ยนค่า) — x=150
@@ -1896,16 +1960,16 @@ static void DrawTopPanel(void)
         MvFmtZ(buf, sizeof(buf));                                                        /* v57 */
         HDRT(buf, 196, 20, CYAN, 1, BLACK);
     } else {
-    snprintf(buf, sizeof(buf), "Vp:%.2fV", (double)osc_meas.vpp);
+    snprintf(buf, sizeof(buf), "Vp:%.2fV", (double)tm.vpp);
     HDRT(buf, 2, 10, CYAN, 1, BLACK);
 
     /* Frequency — x=68 */
     {
         char fb[16];
-        if (osc_meas.freq >= 1000000.0f)  snprintf(fb, sizeof(fb), "%.3fMHz", (double)(osc_meas.freq / 1000000.0f));
-        else if (osc_meas.freq >= 1000.0f) snprintf(fb, sizeof(fb), "%.1fkHz", (double)(osc_meas.freq / 1000.0f));
-        else if (osc_meas.freq >= 10.0f)  snprintf(fb, sizeof(fb), "%.0fHz",  (double)osc_meas.freq);
-        else if (osc_meas.freq > 0.0f)    snprintf(fb, sizeof(fb), "%.2fHz",  (double)osc_meas.freq);   /* <10 Hz: 2 decimals */
+        if (tm.freq >= 1000000.0f)  snprintf(fb, sizeof(fb), "%.3fMHz", (double)(tm.freq / 1000000.0f));
+        else if (tm.freq >= 1000.0f) snprintf(fb, sizeof(fb), "%.1fkHz", (double)(tm.freq / 1000.0f));
+        else if (tm.freq >= 10.0f)  snprintf(fb, sizeof(fb), "%.0fHz",  (double)tm.freq);
+        else if (tm.freq > 0.0f)    snprintf(fb, sizeof(fb), "%.2fHz",  (double)tm.freq);   /* <10 Hz: 2 decimals */
         else if (adc_over_t && (HAL_GetTick() - adc_over_t) < 1500u && !slow_active) snprintf(fb, sizeof(fb), ">2.1MHz");               /* above the readout limit */
         else                              snprintf(fb, sizeof(fb), "---");                            /* unknown, not "0 Hz" */
         snprintf(buf, sizeof(buf), "F:%-8s", fb);
@@ -1913,15 +1977,15 @@ static void DrawTopPanel(void)
     HDRT(buf,72, 10, GREEN, 1, BLACK);
 
     /* RMS — x=245 (245 < 255, safe for uint8_t) */
-    snprintf(buf, sizeof(buf), "Rs:%.2f", (double)osc_meas.vrms);
+    snprintf(buf, sizeof(buf), "Rs:%.2f", (double)tm.vrms);
     HDRT(buf, 148, 10, LIGHTGREY, 1, BLACK);
 
     /* Vmax — x=130 */
-    snprintf(buf, sizeof(buf), "Mx:%.2fV", (double)osc_meas.vmax);
+    snprintf(buf, sizeof(buf), "Mx:%.2fV", (double)tm.vmax);
     HDRT(buf, 2, 20, LIGHTGREY, 1, BLACK);
 
     /* Vmin — x=188 */
-    snprintf(buf, sizeof(buf), "Mn:%.2fV", (double)osc_meas.vmin);
+    snprintf(buf, sizeof(buf), "Mn:%.2fV", (double)tm.vmin);
     HDRT(buf, 72, 20, LIGHTGREY, 1, BLACK);
 
     /* โหมด trigger — AUTO:R / AUTO:F = จัดแนวให้นิ่ง, ROLL = ไถล */
@@ -2582,7 +2646,7 @@ static void FAST_O2 AdcCaptureFrame(void)
     adc_f_held = 0;
     osc_raw_freq = osc_raw_vpp = 0.0f;
     osc_raw_valid = 0;
-    osc_meas = (OscMeasure){0};
+    OSC_LOCK(); osc_meas = (OscMeasure){0}; OSC_UNLOCK();
     strcpy(osc_det, "INVALID");
 
     int lvl; float step;
@@ -2808,7 +2872,7 @@ static void FAST_O2 AdcCaptureFrame(void)
     osc_capture_tdiv = osc_tdivs_ms[osc_tdiv_i];
     osc_frame_valid = 1;
     new_frame_ready = 1;
-    osc_dirty       = 1;
+    OSC_SET(osc_dirty      , 1);
     return;
 failed:
     dbg_adc_ok = 0;
@@ -2816,7 +2880,7 @@ failed:
     adc_over_range = 0;
     adc_over_t = 0;
     osc_raw_freq = osc_raw_vpp = 0.0f;
-    osc_dirty = 1;
+    OSC_SET(osc_dirty, 1);
 }
 
 /* SLOW_BEGIN ================================================================
@@ -3230,6 +3294,14 @@ static uint32_t mv_raw_off = 0, mv_raw_n = 0, mv_z_w = 1;     /* mv_raw[j] = adc
 static float    mv_z_step = 1.0f;
 static uint32_t mv_z_start = 0;
 
+static int OscExtPoint(int k, float *v)       /* v76: the filter's real neighbours just outside the screen (FAST only) */
+{
+    if (slow_active) return 0;                                   /* SLOW frames do not refresh mv_ext_*: never use stale points */
+    if (k < 0 && (-k - 1) < mv_nlo)            { *v = (float)mv_ext_lo[-k - 1]; return 1; }
+    if (k >= N_SAMPLES && (k - N_SAMPLES) < mv_nhi) { *v = (float)mv_ext_hi[k - N_SAMPLES]; return 1; }
+    return 0;
+}
+
 static FAST_O2 void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n)
 {
     int k, cnt;
@@ -3401,6 +3473,7 @@ static void MvBuildView(void)                /* mv_view_v[] = the frozen capture
 
 #else  /* !ADC_INPUT_ENABLE */
 static void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n) { (void)start; (void)step; (void)w; (void)n; }
+static int OscExtPoint(int k, float *v) { (void)k; (void)v; return 0; }
 static void MvFreezeCapture(void) { mv_x_min = mv_x_max = 0; }
 static void MvBuildView(void) { mv_view_on = 0; }
 void OscSlowTick(void) { }
@@ -3418,6 +3491,13 @@ static void vMainTask(void *argument)
     (void)argument;
     static uint32_t last_frame_tick  = 0;
     static uint32_t last_header_tick = 0;
+
+    /* v66b: one-shot start-up, runs AFTER vTaskStartScheduler() so xSemaphoreTake/Give are legal
+     * (xOscMutex was created in main() before xTaskCreate; creation does not block, only Take/Give must wait for the scheduler). */
+    UartPanel();              /* แสดงเมนู/สถานะครั้งแรกออกพอร์ต serial */
+    DrawGrid();
+    DrawCursor();
+    DrawTopPanel();
 
     for (;;)
     {
@@ -3474,7 +3554,7 @@ static void vMainTask(void *argument)
 #if ADC_INPUT_ENABLE
                     SlowSync();                   /* T/DIV >= 50 ms -> SLOW (ring), ไม่งั้น FAST (burst) */
                     { uint32_t pc0 = DWT->CYCCNT;
-                    if (slow_active) { AdcAbortPending(); SlowCaptureFrame(); }
+                    if (slow_active) { AdcAbortPending(); OSC_LOCK(); SlowCaptureFrame(); OSC_UNLOCK(); }
                     else             AdcCaptureFrame();   /* p30: อ่านข้อมูลจริงจาก ADC (PA0) */
                     prof_us[0] = AdcElapsedUs(pc0); }
                     if (!osc_frame_valid) goto skip_draw;
@@ -3541,7 +3621,7 @@ static void vMainTask(void *argument)
                 DrawCursors();          /* HOLD: วาดเส้น C1/C2 ทับหลังวาดรูป */
                 DrawSettingBar();       /* แถบ "กำลังตั้งค่าอะไร" ทับหลังวาดรูป */
                 prof_us[2] = AdcElapsedUs(pd0);
-                osc_dirty = 0;
+                OSC_SET(osc_dirty, 0);
 
 #if SHOW_FPS
                 dbg_wf_ms = HAL_GetTick() - t_wf0;
@@ -3556,7 +3636,7 @@ static void vMainTask(void *argument)
                 /* SINGLE mode: lock after first captured frame */
                 if (trigger_mode == TRIG_SINGLE) {
                     single_captured = 1;
-                    hold_active     = 1;
+                    OSC_SET(hold_active    , 1);
                 }
             }
             skip_draw: ;
@@ -3651,7 +3731,7 @@ int main(void)
 
     /* LCD init */
     UartInputInit();          /* เริ่มรับคำสั่งจาก USART3 (Virtual COM) */
-    UartPanel();              /* แสดงเมนู/สถานะครั้งแรกออกพอร์ต serial */
+    /* v66b: UartPanel() moved to the start of vMainTask (it reads osc_meas under the mutex; no Take before the scheduler) */
 
     ILI9341_Init();
     ILI9341_Set_Rotation(SCREEN_HORIZONTAL_1);
@@ -3688,13 +3768,13 @@ int main(void)
     /* Initial double-buffer state */
     for (int i = 0; i < N_SAMPLES; i++) old_y[i] = CENTER_Y;
 
-    DrawGrid();
-    DrawCursor();
-    DrawTopPanel();
+    /* v66b: initial DrawGrid/DrawCursor/DrawTopPanel moved to the start of vMainTask (DrawTopPanel locks the mutex) */
 
     /* USER CODE END 2 */
 
     /* USER CODE BEGIN WHILE */
+    xOscMutex = xSemaphoreCreateMutex();
+    if (xOscMutex == NULL) Error_Handler();
     xTaskCreate(vMainTask, "Main", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);
     vTaskStartScheduler();   /* never returns */
     for (;;) { }

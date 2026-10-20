@@ -6,6 +6,13 @@ import subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_draw'; OUT.mkdir(parents=True, exist_ok=True)
 src = (ROOT/'Core/Src/main.c').read_text()
+import re
+# v75: take the real grid rule (GRID_* + IS_GRID_DOT) from main.c so the test cannot drift from the firmware
+_gl, _cont = [], False
+for _ln in src.split('\n'):
+    if _cont or re.match(r'#define (?:GRID_\w+|IS_GRID_DOT)\b', _ln):
+        _gl.append(_ln); _cont = _ln.rstrip().endswith('\\')
+grid_defs = '\n'.join(_gl)
 a, b = src.index('/* DRAWWF_BEGIN */'), src.index('/* DRAWWF_END */')
 (OUT/'drawwf.c').write_text(src[a:b])
 harness = r'''
@@ -18,9 +25,7 @@ harness = r'''
 #define SCREEN_W 320
 #define SCREEN_H 240
 #define WAVEFORM_TOP 29
-#define GRID_Y_STEP 40
-#define GRID_Y_OFFSET 0
-#define GRID_X_DOT 6
+GRID_DEFS_HERE
 #define BLACK 0x0000
 #define YELLOW 0xFFE0
 #define DARKGREY 0x7BEF
@@ -69,10 +74,15 @@ int main(void){
     }
     printf("PASS %s\n", sc[s].name);
   }
+  /* v75: vertical T/DIV grid: dotted line exactly at x = 0,32,...,288 (x=160 is the cyan centre cursor) */
+  { int ok=1, nlines=0; hold_active=0;
+    for(int x=0;x<SCREEN_W;x++){ int dots=0; for(int y=WAVEFORM_TOP;y<SCREEN_H;y++) if(y%GRID_Y_STEP!=GRID_Y_OFFSET && BackgroundColour(x,y)==DARKGREY) dots++;
+      int want = (x%32==0 && x!=(int)cursor_x); if(want){ nlines++; if(dots<40) ok=0; } else if(dots) ok=0; }
+    printf("%s vertical grid every 1 T/DIV (32 px): %d dotted lines + centre cursor\n", (ok&&nlines==9)?"PASS":"FAIL", nlines); if(!(ok&&nlines==9)) failures++; }
   printf("pixels written per frame (avg): %ld  (old per-pixel method wrote 6000-9000 at 15 cycles and cost ~58 us each)\n", total/nfr);
   printf("draw failures=%d\n", failures); return failures; }
 '''
-(OUT/'t.c').write_text(harness)
+(OUT/'t.c').write_text(harness.replace('GRID_DEFS_HERE', grid_defs))
 r = subprocess.run(['gcc','-O1','-Wall','-I',str(OUT),'-o',str(OUT/'t'),str(OUT/'t.c'),'-lm'],capture_output=True,text=True)
 print(r.stderr[-1500:])
 print(subprocess.run([str(OUT/'t')],capture_output=True,text=True).stdout)

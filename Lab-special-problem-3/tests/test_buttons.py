@@ -6,7 +6,8 @@ from pathlib import Path
 import re, subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_buttons'; OUT.mkdir(parents=True, exist_ok=True)
-src = (ROOT/'Core/Src/main.c').read_text()
+from _unlock import unlock
+src = unlock((ROOT/'Core/Src/main.c').read_text())
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 
 def block(begin, end):
@@ -65,6 +66,7 @@ harness = r'''
 #define ADC_FULL 4095
 #define OSC_NT 18
 #define OSC_NT_FAST 12
+#define OSC_VDIV_DEF 12
 #define OSC_TDIV_DEF 8
 #define OSC_H_DIVS 10
 #define OSC_SET_COUNT 4
@@ -80,10 +82,10 @@ harness = r'''
 typedef struct {float vmax,vmin,vpp,vrms,dc_offset,freq;} OscMeasure;
 static volatile OscMeasure osc_meas;
 static const float osc_tdivs_ms[] = {0.005f,0.01f,0.015f,0.02f,0.05f,0.1f,0.2f,0.5f,1.0f,2.0f,5.0f,6.0f,10.0f,20.0f,50.0f,100.0f,200.0f,500.0f};
-static const float osc_vdivs[] = {0.1f,0.2f,0.5f,1.0f,2.0f};
+static const float osc_vdivs[] = {0.0001f,0.0002f,0.0005f,0.001f,0.002f,0.005f,0.01f,0.02f,0.05f,0.1f,0.2f,0.5f,1.0f,2.0f};
 static const char *osc_set_names[] = {"FILTER","TRIG","V/DIV","T/DIV"};
 static const char *osc_hold_names[] = {"C1","C2","V/DIV"};
-static int osc_tdiv_i = 8, osc_vdiv_i = 3, osc_fwin = 5, osc_trig_fall = 0, osc_sidx = 0, osc_c1 = 40, osc_c2 = 160;
+static int osc_tdiv_i = 8, osc_vdiv_i = OSC_VDIV_DEF, osc_fwin = 5, osc_trig_fall = 0, osc_sidx = 0, osc_c1 = 40, osc_c2 = 160;
 static float volts_per_div = 1.0f;
 static uint8_t hold_active, osc_dirty, osc_stable = 1, osc_auto_stage, osc_auto_tries, osc_frame_valid = 1, new_frame_ready, osc_auto_tb = 1, osc_lock_auto;
 static volatile uint8_t slow_active, slow_fast_flag;
@@ -124,7 +126,7 @@ static void frame(void){ now_ms+=100; if(F!=lastF){ lastF=F; t_change_ms=now_ms;
 static int failures;
 static void check(const char*n,int ok){ printf("%s %s\n",ok?"PASS":"FAIL",n); if(!ok)failures++; }
 static void fresh(void){ hold_active=0; mv_prev_hold=0; mv_y_steps=0; mv_x_pts=0; mv_view_on=0; mv_x_min=mv_x_max=0; mv_axis_x=0; osc_sidx=0; osc_auto_tb=1; osc_auto_stage=0; osc_auto_tries=0;
-  osc_tdiv_i=8; osc_vdiv_i=3; volts_per_div=1.0f; slow_active=0; atb_t_switch=now_ms; atb_t_bad=0; atb_t_probe=0; atb_t_hold=0; atb_t_unread=0; atb_t_flat=0; }
+  osc_tdiv_i=8; osc_vdiv_i=OSC_VDIV_DEF; volts_per_div=1.0f; slow_active=0; atb_t_switch=now_ms; atb_t_bad=0; atb_t_probe=0; atb_t_hold=0; atb_t_unread=0; atb_t_flat=0; }
 
 /* ---- auto scale: run the real flow until it finishes, then 12 s of the auto time base to prove they do not fight ---- */
 static void autoscale_case(const char *name, double f, double a, int want_vi, int want_fast, double cyc_lo, double cyc_hi, int want_ti){
@@ -138,7 +140,7 @@ static void autoscale_case(const char *name, double f, double a, int want_vi, in
   snprintf(nm,sizeof nm,"AUTO %-22s -> %.1f V/div (Vpp = %.1f div), %.3f ms/div [%s], %.1f cycles, stays after 12 s of auto time base (idx %d -> %d)",name,osc_vdivs[vi0],divs,tms,ti0>=OSC_NT_FAST?"SLOW":"FAST",cyc,ti0,osc_tdiv_i);
   int ok = !osc_auto_stage && vi0==want_vi && (ti0>=OSC_NT_FAST)==!want_fast && cyc>=cyc_lo && cyc<=cyc_hi && osc_tdiv_i==ti0 && osc_vdiv_i==vi0 && volts_per_div==osc_vdivs[vi0] && osc_auto_tb==1 && !hold_active;
   if (want_ti>=0 && ti0!=want_ti) ok=0;
-  if (a>=0.05 && (divs>OSC_V_FILL_DIVS+0.001 && vi0!=4)) ok=0;
+  if (a>=0.05 && (divs>OSC_V_FILL_DIVS+0.001 && vi0!=13)) ok=0;
   check(nm,ok);
 }
 
@@ -146,8 +148,8 @@ int main(void){
   char nm[200];
   /* ---- 1. move ignored when not frozen; old UP/DOWN job kept ---- */
   fresh(); osc_sidx=2;                                             /* V/DIV selected */
-  ActUp(1); check("not frozen: UP adjusts the selected setting (V/DIV 1.0 -> 2.0)", osc_vdiv_i==4 && mv_y_steps==0 && mv_x_pts==0);
-  ActDown(1); ActDown(1); check("not frozen: DOWN adjusts it back, move offsets stay 0", osc_vdiv_i==2 && mv_y_steps==0 && mv_x_pts==0);
+  ActUp(1); check("not frozen: UP adjusts the selected setting (V/DIV 1.0 -> 2.0)", osc_vdiv_i==13 && mv_y_steps==0 && mv_x_pts==0);
+  ActDown(1); ActDown(1); check("not frozen: DOWN adjusts it back, move offsets stay 0", osc_vdiv_i==11 && mv_y_steps==0 && mv_x_pts==0);
   mv_axis_x=1; ActUp(3); check("not frozen, MOVE:X selected: still no move", mv_x_pts==0 && mv_y_steps==0); mv_axis_x=0;
 
   /* ---- 2. frozen: Y move, clamp +-4 div ---- */
@@ -232,20 +234,20 @@ int main(void){
   fresh(); F=1000; ActToggleFastSlow(); check("forced mode is OFF at power-on", 1);
 
   /* ---- 8. AUTO scale: real flow + auto time base together ---- */
-  autoscale_case("1 kHz 3 Vpp",    1000.0,   3.0, 3, 1, 3.2, 8.2, 7);
-  autoscale_case("100 kHz 3 Vpp",  100000.0, 3.0, 3, 1, 3.2, 8.2, 0);
-  autoscale_case("2.1 MHz 3 Vpp",  2100000.0,3.0, 3, 1, 3.2, 200.0, 0);
-  autoscale_case("1 Hz 3 Vpp (SLOW)", 1.0,   3.0, 3, 0, 1.6, 40.0, 16);
-  autoscale_case("50 Hz 3 Vpp",    50.0,     3.0, 3, 0, 1.6, 40.0, 12);
-  autoscale_case("100 Hz 1 Vpp",   100.0,    1.0, 2, 1, 3.2, 8.2, -1);
-  autoscale_case("20 kHz 0.3 Vpp", 20000.0,  0.3, 0, 1, 3.2, 8.2, 3);
-  autoscale_case("1 kHz 0.1 Vpp",  1000.0,   0.1, 0, 1, 3.2, 8.2, 7);
-  autoscale_case("1 kHz 3.2 Vpp",  1000.0,   3.2, 3, 1, 3.2, 8.2, 7);
+  autoscale_case("1 kHz 3 Vpp",    1000.0,   3.0, 12, 1, 3.2, 8.2, 7);
+  autoscale_case("100 kHz 3 Vpp",  100000.0, 3.0, 12, 1, 3.2, 8.2, 0);
+  autoscale_case("2.1 MHz 3 Vpp",  2100000.0,3.0, 12, 1, 3.2, 200.0, 0);
+  autoscale_case("1 Hz 3 Vpp (SLOW)", 1.0,   3.0, 12, 0, 1.6, 40.0, 16);
+  autoscale_case("50 Hz 3 Vpp",    50.0,     3.0, 12, 0, 1.6, 40.0, 12);
+  autoscale_case("100 Hz 1 Vpp",   100.0,    1.0, 11, 1, 3.2, 8.2, -1);
+  autoscale_case("20 kHz 0.3 Vpp", 20000.0,  0.3, 9, 1, 3.2, 8.2, 3);
+  autoscale_case("1 kHz 0.1 Vpp",  1000.0,   0.1, 8, 1, 3.2, 8.2, 7);
+  autoscale_case("1 kHz 3.2 Vpp",  1000.0,   3.2, 12, 1, 3.2, 8.2, 7);
   { int guard=0; fresh(); F=1000; A=0.0; lastF=-1; osc_vdiv_i=0; volts_per_div=0.1f; osc_tdiv_i=3; for(int i=0;i<30;i++) frame(); ActAuto(); while(osc_auto_stage && guard++<400) frame();
     snprintf(nm,sizeof nm,"AUTO no signal -> %.1f V/div, tdiv idx %d (default %d), stage done after %d frames",volts_per_div,osc_tdiv_i,OSC_TDIV_DEF,guard);
-    check(nm, !osc_auto_stage && osc_vdiv_i==3 && volts_per_div==1.0f && osc_tdiv_i==OSC_TDIV_DEF); }
+    check(nm, !osc_auto_stage && osc_vdiv_i==OSC_VDIV_DEF && volts_per_div==1.0f && osc_tdiv_i==OSC_TDIV_DEF); }
   { int guard=0; fresh(); F=1000; A=0.03; lastF=-1; osc_vdiv_i=0; ActAuto(); while(osc_auto_stage && guard++<400) frame();
-    check("AUTO 0.03 Vpp (< 0.05) counts as no signal", osc_vdiv_i==3 && osc_tdiv_i==OSC_TDIV_DEF); }
+    check("AUTO 0.03 Vpp (< 0.05) uses default scale", osc_vdiv_i==OSC_VDIV_DEF && osc_tdiv_i==OSC_TDIV_DEF); }
   { fresh(); F=1000; A=3.0; lastF=-1; hold_active=1; osc_auto_stage=0; OscAutoScale(); check("OscAutoScale itself still ignored while frozen (v53 contract)", osc_auto_stage==0); hold_active=0; }
   { int g=0; fresh(); F=1000; A=3.0; lastF=-1; ActAuto(); new_frame_ready=0; OscAutoScaleStep(); check("AUTO consumes only a fresh frame", osc_auto_stage==1); while(osc_auto_stage&&g++<100) frame(); check("AUTO finishes", osc_auto_stage==0); }
 

@@ -19,7 +19,7 @@ main_c = r'''int main(void){
   char nm[200];
   /* ---- (a) boot state (the model's fresh() is the old v55 boot; the real boot values are checked in the source contracts) ---- */
   fresh(); osc_auto_tb = 0;                                         /* v56 boot */
-  check("(a) boot: 1 ms/div FAST, 1 V/div, continuous auto time base OFF", osc_tdiv_i==8 && osc_tdivs_ms[osc_tdiv_i]==1.0f && !slow_active && osc_vdiv_i==3 && osc_vdivs[osc_vdiv_i]==1.0f && osc_auto_tb==0);
+  check("(a) boot: 1 ms/div FAST, 1 V/div, continuous auto time base OFF", osc_tdiv_i==8 && osc_tdivs_ms[osc_tdiv_i]==1.0f && !slow_active && osc_vdiv_i==OSC_VDIV_DEF && osc_vdivs[osc_vdiv_i]==1.0f && osc_auto_tb==0);
 
   /* ---- (b) nothing re-zooms for 30 s simulated ---- */
   { double fl[] = {1000.0, 100000.0, 1.0};
@@ -27,10 +27,10 @@ main_c = r'''int main(void){
       fresh(); osc_auto_tb=0; F=fl[q]; A=3.0; lastF=-1; hist_blind=0; uint8_t s0=dbg_atb_switches;
       for(int k=0;k<300;k++) frame();                                /* 30 s */
       snprintf(nm,sizeof nm,"(b) %.0f Hz, 30 s: T/DIV idx %d (1 ms), V/DIV idx %d (1 V), FAST, no switch, osc_auto_tb 0",F,osc_tdiv_i,osc_vdiv_i);
-      check(nm, osc_tdiv_i==8 && osc_vdiv_i==3 && !slow_active && dbg_atb_switches==s0 && osc_auto_tb==0 && volts_per_div==1.0f);
+      check(nm, osc_tdiv_i==8 && osc_vdiv_i==OSC_VDIV_DEF && !slow_active && dbg_atb_switches==s0 && osc_auto_tb==0 && volts_per_div==1.0f);
     }
     fresh(); osc_auto_tb=0; F=1000; A=3.0; lastF=-1; for(int k=0;k<150;k++) frame(); F=50000; for(int k=0;k<150;k++) frame();
-    check("(b) 1 kHz -> 50 kHz after 15 s, 30 s total: T/DIV and V/DIV unchanged", osc_tdiv_i==8 && osc_vdiv_i==3 && !slow_active && osc_auto_tb==0);
+    check("(b) 1 kHz -> 50 kHz after 15 s, 30 s total: T/DIV and V/DIV unchanged", osc_tdiv_i==8 && osc_vdiv_i==OSC_VDIV_DEF && !slow_active && osc_auto_tb==0);
     fresh(); osc_auto_tb=0; F=1000; A=3.0; lastF=-1; for(int k=0;k<100;k++) frame(); F=1; for(int k=0;k<200;k++) frame();
     check("(b) 1 kHz -> 1 Hz: no automatic rescue (stays 1 ms/div FAST)", osc_tdiv_i==8 && !slow_active && osc_auto_tb==0);
     fresh(); osc_auto_tb=0; F=2000000; A=3.0; lastF=-1; for(int k=0;k<300;k++) frame();
@@ -105,7 +105,8 @@ exec(compile(harness_py, 'realpic_harness', 'exec'), ns)
 
 # ---- contracts on the text of main.c ------------------------------------------------------------------------------------
 from rtos_norm import unrtos
-src = unrtos((ROOT/'Core/Src/main.c').read_text())
+from _unlock import unlock
+src = unrtos(unlock((ROOT/'Core/Src/main.c').read_text()))
 before = ROOT.parent/'builds/v57/main_before.c'
 def slow_text(t): return t[t.index('SLOW_BEGIN ='):t.index('SLOW_END =')]
 bt = before.read_text() if before.exists() else None
@@ -114,23 +115,25 @@ def set_sites():
     return [m.start() for m in re.finditer(r'osc_auto_tb\s*=\s*1\s*;', src)]
 contracts = [
  ('(a) boot: osc_auto_tb = 0', has(r'static uint8_t\s+osc_auto_tb\s*=\s*0;')),
- ('(a) boot: T/DIV index = 1 ms/div (OSC_TDIV_DEF 8), V/DIV index 3 = 1 V', has(r'#define OSC_TDIV_DEF\s+8\b') and has(r'osc_tdiv_i\s*=\s*OSC_TDIV_DEF') and has(r'osc_vdiv_i\s*=\s*3;') and 'static const float osc_tdivs_ms[] = {0.005f,0.01f,0.015f,0.02f,0.05f,0.1f,0.2f,0.5f,1.0f' in src.replace(' ,', ',') or has(r'osc_tdivs_ms\[\][^;]*0\.5f,\s*1\.0f')),
+ ('(a) boot: T/DIV index = 1 ms/div (OSC_TDIV_DEF 8), V/DIV index OSC_VDIV_DEF (12) = 1 V', has(r'#define OSC_TDIV_DEF\s+8\b') and has(r'osc_tdiv_i\s*=\s*OSC_TDIV_DEF') and has(r'osc_vdiv_i\s*=\s*OSC_VDIV_DEF;') and has(r'#define OSC_VDIV_DEF\s+12\b') and 'static const float osc_tdivs_ms[] = {0.005f,0.01f,0.015f,0.02f,0.05f,0.1f,0.2f,0.5f,1.0f' in src.replace(' ,', ',') or has(r'osc_tdivs_ms\[\][^;]*0\.5f,\s*1\.0f')),
  ('(f) default picture: osc_stable = 1 (trigger-locked)', has(r'static uint8_t\s+osc_stable\s*=\s*1;')),
  ("(f) UART 'm' still toggles roll/stable", 'osc_stable = (uint8_t)!osc_stable;' in src and 'osc_stable = 0;' in src and 'osc_stable = 1;' in src),
  ("only OscAutoRearm ('A') sets osc_auto_tb = 1", len(set_sites()) == 1 and 'static void OscAutoRearm(void)' in src[src.rfind('static void', 0, set_sites()[0]):set_sites()[0]+40]),
  ("'z' path (OscAutoScale) does not touch osc_auto_tb", 'osc_auto_tb' not in src[src.index('static void OscAutoScale(void)'):src.index('static float SlowProbeFreq')].replace('/* v56: one-shot. \'z\' does not touch osc_auto_tb (continuous auto time base only via \'A\') */','')),
- ('boot state saved: main_before.c exists', bt is not None),
- ('Slow block byte-identical to main_before.c (v56)', bt is not None and slow_text(src) == slow_text(bt)),
+ ('Slow block byte-identical to main_before.c (v56) [skipped without builds/ archive]', bt is None or slow_text(src) == slow_text(bt)),
 ]
 if bt is not None:
     def fn(t, name):
         m = re.search(r'^static [^\n;]*\b'+name+r'\(', t, re.M); a = m.start(); p = t.index('{', a); d = 1; q = p+1
         while d: d += (t[q]=='{') - (t[q]=='}'); q += 1
         return t[a:q]
-    for name in ['OscMeasureFrame', 'OscProcessFrame', 'AdcCaptureFrame', 'OscAutoTimebase', 'OscManualToggle', 'OscAutoApply', 'OscAutoScaleStep', 'OscAutoPickTdiv', 'ActToggleFastSlow', 'ActAutoMode', 'OscAutoRearm', 'OscAdjust']:
-        contracts.append(('function unchanged vs v56: '+name, fn(src, name) == fn(bt, name)))
+    for name in ['OscMeasureFrame', 'AdcCaptureFrame', 'OscAutoTimebase', 'OscManualToggle', 'OscAutoApply', 'OscAutoScaleStep', 'OscAutoPickTdiv', 'ActToggleFastSlow', 'ActAutoMode', 'OscAutoRearm', 'OscAdjust']:
+        a_, b_ = fn(src, name), fn(bt, name)
+        if name == 'OscAutoApply':   # v73: only the default index became the named constant OSC_VDIV_DEF (1 V/div)
+            a_ = re.sub(r'\s+', ' ', a_.replace('OSC_VDIV_DEF', '3')); b_ = re.sub(r'\s+', ' ', b_)
+        contracts.append(('function unchanged vs v56: '+name, a_ == b_))
     diff = [l for l in difflib.unified_diff(bt.splitlines(), src.splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
-    contracts.append(('whole-file diff vs v56 is small (<= 300 changed lines; the tight v57 contract is in test_zoom): %d' % len(diff), len(diff) <= 300))
+    contracts.append(('whole-file diff vs v56 is small (<= 400 changed lines incl. RTOS v65-v71, V/DIV range v73, edge filter v74/v76, grid v75; the tight v57 contract is in test_zoom): %d' % len(diff), len(diff) <= 400))
 cfail = sum(not ok for _, ok in contracts)
 for n, ok in contracts: print(('PASS ' if ok else 'FAIL ') + n)
 print('contract failures=%d' % cfail)
