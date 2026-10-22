@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<title>Oscilloscope display — moving graph preview</title>
+<style>
+  .wrap { color: var(--foreground); }
+  canvas { image-rendering: pixelated; border: 1px solid var(--border); display: block; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .grp { display: flex; gap: 6px; align-items: center; padding-right: 10px; border-right: 1px solid var(--border); }
+  .grp:last-child { border-right: 0; }
+  button { font: inherit; font-size: 13px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--foreground); cursor: pointer; }
+  button:active, button.on { background: var(--accent); }
+  .lbl { color: var(--muted-foreground); font-size: 12px; }
+  .hud { margin-top: 8px; font-size: 12px; color: var(--muted-foreground); line-height: 1.7; font-variant-numeric: tabular-nums; }
+  .hud b { color: var(--foreground); font-weight: 600; }
+  .bad { color: #e5534b; }
+  .ok { color: #3fb950; }
+  .note { margin-top: 10px; font-size: 12px; color: var(--muted-foreground); max-width: 660px; line-height: 1.6; }
+  .note code { color: var(--foreground); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="cv" width="320" height="240" style="width:640px;height:480px"></canvas>
+
+  <div class="row">
+    <div class="grp">
+      <span class="lbl">BTN</span>
+      <button id="bUp">UP</button>
+      <button id="bDown">DOWN</button>
+      <button id="bHold">HOLD</button>
+      <button id="bSet">SET</button>
+      <span class="lbl">(กดค้าง SET 2 วิ = AUTO SCALE · คลิกแล้วค้างจริงได้)</span>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="grp">
+      <span class="lbl">โหมดข้อมูล</span>
+      <button id="dMock" class="on">sine ปลอม (mock)</button>
+      <button id="dReal">สัญญาณจริงจำลอง (off-frequency + noise)</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="grp">
+      <span class="lbl">ตรงตามโค้ด / แก้แล้ว</span>
+      <button id="aCenter">CENTER_Y 120→129</button>
+      <button id="aRms">RMS x245→214</button>
+      <button id="aClear">ล้าง header 17→18</button>
+      <button id="aLong">long-press ไม่ทับ short</button>
+      <button id="aWrap">ไม่ wrap buffer (trigger)</button>
+    </div>
+  </div>
+
+  <div class="hud" id="hud"></div>
+
+  <div class="note">
+    ตัวจำลองนี้รันอัลกอริทึมเดียวกันกับ <code>Core/Src/main.c</code> และตัวอักษรใช้ฟอนต์เดียวกับ
+    <code>5x5_font.h</code> จริง — ปุ่ม/สวิตช์ด้านบนสั่งงาน state machine ตัวเดียวกับ <code>HandleButtons()</code>
+  </div>
+</div>
+
+<script>
+//<<<CORE
+/* =============================================================================
+ * CORE — faithful port of the martnak ILI9341 driver + main.c display module.
+ * ไม่แตะ DOM ทั้งหมด เพื่อให้ทดสอบแบบ headless ได้
+ * ========================================================================== */
+var FONT = [
+  [0x00,0x00,0x00,0x00,0x00,0x00],
+  [0x5C,0x00,0x00,0x00,0x00,0x00],
+  [0x06,0x00,0x06,0x00,0x00,0x00],
+  [0x28,0x7C,0x28,0x7C,0x28,0x00],
+  [0x5C,0x54,0xFE,0x54,0x74,0x00],
+  [0x44,0x20,0x10,0x08,0x44,0x00],
+  [0x28,0x54,0x54,0x20,0x50,0x00],
+  [0x06,0x00,0x00,0x00,0x00,0x00],
+  [0x38,0x44,0x00,0x00,0x00,0x00],
+  [0x44,0x38,0x00,0x00,0x00,0x00],
+  [0x02,0x07,0x02,0x00,0x00,0x00],
+  [0x10,0x10,0x7C,0x10,0x10,0x00],
+  [0xC0,0x00,0x00,0x00,0x00,0x00],
+  [0x10,0x10,0x10,0x10,0x10,0x00],
+  [0x40,0x00,0x00,0x00,0x00,0x00],
+  [0x60,0x10,0x0C,0x00,0x00,0x00],
+  [0x7C,0x64,0x54,0x4C,0x7C,0x00],
+  [0x48,0x7C,0x40,0x00,0x00,0x00],
+  [0x64,0x54,0x54,0x54,0x48,0x00],
+  [0x44,0x54,0x54,0x54,0x6C,0x00],
+  [0x3C,0x20,0x70,0x20,0x20,0x00],
+  [0x5C,0x54,0x54,0x54,0x24,0x00],
+  [0x7C,0x54,0x54,0x54,0x74,0x00],
+  [0x04,0x04,0x64,0x14,0x0C,0x00],
+  [0x7C,0x54,0x54,0x54,0x7C,0x00],
+  [0x5C,0x54,0x54,0x54,0x7C,0x00],
+  [0x44,0x00,0x00,0x00,0x00,0x00],
+  [0xC4,0x00,0x00,0x00,0x00,0x00],
+  [0x10,0x28,0x44,0x00,0x00,0x00],
+  [0x28,0x28,0x28,0x28,0x28,0x00],
+  [0x44,0x28,0x10,0x00,0x00,0x00],
+  [0x08,0x04,0x54,0x08,0x00,0x00],
+  [0x7C,0x44,0x54,0x54,0x5C,0x00],
+  [0x7C,0x24,0x24,0x24,0x7C,0x00],
+  [0x7C,0x54,0x54,0x54,0x6C,0x00],
+  [0x7C,0x44,0x44,0x44,0x44,0x00],
+  [0x7C,0x44,0x44,0x44,0x38,0x00],
+  [0x7C,0x54,0x54,0x54,0x44,0x00],
+  [0x7C,0x14,0x14,0x14,0x04,0x00],
+  [0x7C,0x44,0x44,0x54,0x74,0x00],
+  [0x7C,0x10,0x10,0x10,0x7C,0x00],
+  [0x44,0x44,0x7C,0x44,0x44,0x00],
+  [0x60,0x40,0x40,0x44,0x7C,0x00],
+  [0x7C,0x10,0x10,0x28,0x44,0x00],
+  [0x7C,0x40,0x40,0x40,0x40,0x00],
+  [0x7C,0x08,0x10,0x08,0x7C,0x00],
+  [0x7C,0x08,0x10,0x20,0x7C,0x00],
+  [0x38,0x44,0x44,0x44,0x38,0x00],
+  [0x7C,0x14,0x14,0x14,0x08,0x00],
+  [0x3C,0x24,0x64,0x24,0x3C,0x00],
+  [0x7C,0x14,0x14,0x14,0x68,0x00],
+  [0x5C,0x54,0x54,0x54,0x74,0x00],
+  [0x04,0x04,0x7C,0x04,0x04,0x00],
+  [0x7C,0x40,0x40,0x40,0x7C,0x00],
+  [0x0C,0x30,0x40,0x30,0x0C,0x00],
+  [0x3C,0x40,0x30,0x40,0x3C,0x00],
+  [0x44,0x28,0x10,0x28,0x44,0x00],
+  [0x0C,0x10,0x60,0x10,0x0C,0x00],
+  [0x44,0x64,0x54,0x4C,0x44,0x00],
+  [0x7C,0x44,0x00,0x00,0x00,0x00],
+  [0x0C,0x10,0x60,0x00,0x00,0x00],
+  [0x44,0x7C,0x00,0x00,0x00,0x00],
+  [0x00,0x01,0x00,0x01,0x00,0x00],
+  [0x40,0x40,0x40,0x40,0x40,0x40],
+  [0x00,0x01,0x00,0x00,0x00,0x00],
+  [0x7C,0x24,0x24,0x24,0x7C,0x00],
+  [0x7C,0x54,0x54,0x54,0x6C,0x00],
+  [0x7C,0x44,0x44,0x44,0x44,0x00],
+  [0x7C,0x44,0x44,0x44,0x38,0x00],
+  [0x7C,0x54,0x54,0x54,0x44,0x00],
+  [0x7C,0x14,0x14,0x14,0x04,0x00],
+  [0x7C,0x44,0x44,0x54,0x74,0x00],
+  [0x7C,0x10,0x10,0x10,0x7C,0x00],
+  [0x44,0x44,0x7C,0x44,0x44,0x00],
+  [0x60,0x40,0x40,0x44,0x7C,0x00],
+  [0x7C,0x10,0x10,0x28,0x44,0x00],
+  [0x7C,0x40,0x40,0x40,0x40,0x00],
+  [0x7C,0x08,0x10,0x08,0x7C,0x00],
+  [0x7C,0x08,0x10,0x20,0x7C,0x00],
+  [0x38,0x44,0x44,0x44,0x38,0x00],
+  [0x7C,0x14,0x14,0x14,0x08,0x00],
+  [0x3C,0x24,0x64,0x24,0x3C,0x00],
+  [0x7C,0x14,0x14,0x14,0x68,0x00],
+  [0x5C,0x54,0x54,0x54,0x74,0x00],
+  [0x04,0x04,0x7C,0x04,0x04,0x00],
+  [0x7C,0x40,0x40,0x40,0x7C,0x00],
+  [0x0C,0x30,0x40,0x30,0x0C,0x00],
+  [0x3C,0x40,0x30,0x40,0x3C,0x00],
+  [0x44,0x28,0x10,0x28,0x44,0x00],
+  [0x0C,0x10,0x60,0x10,0x0C,0x00],
+  [0x44,0x64,0x54,0x4C,0x44,0x00],
+  [0x10,0x7C,0x44,0x00,0x00,0x00],
+  [0x6C,0x00,0x00,0x00,0x00,0x00],
+  [0x44,0x7C,0x10,0x00,0x00,0x00],
+  [0x02,0x01,0x02,0x01,0x00,0x00],
+  [0x00,0x00,0x00,0x00,0x00,0x00]
+];
+
+const C_BLACK       = 0x0000;
+const C_DARKCYAN    = 0x03EF;
+const C_LIGHTGREY   = 0xC618;
+const C_DARKGREY    = 0x7BEF;
+const C_GREEN       = 0x07E0;
+const C_CYAN        = 0x07FF;
+const C_RED         = 0xF800;
+const C_YELLOW      = 0xFFE0;
+const C_WHITE       = 0xFFFF;
+const C_ORANGE      = 0xFD20;
+
+var SIM_CORE = (function () {
+
+  /* ---- screen geometry (SCREEN_HORIZONTAL_1 => 320x240) ------------------ */
+  const SCREEN_W = 320, SCREEN_H = 240;
+  let LCD_W = 320, LCD_H = 240;
+
+  const N_SAMPLES      = 240;
+  const HEADER_H       = 19;
+  const WAVEFORM_TOP   = HEADER_H;
+  const GRID_Y_STEP    = 40;
+  const GRID_X_DOT     = 6;
+  const ADC_MID        = 2048;
+  const ADC_FULL       = 4095;
+  const ADC_VREF       = 3.3;
+  const FRAME_MS       = 33;
+  const HEADER_MS      = 300;
+  const BTN_DEBOUNCE_MS= 200;
+  const BTN_LONG_MS    = 2000;
+
+  const vdiv_table     = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 5.0];
+  const VDIV_COUNT     = 7;
+  const timediv_labels = ["0.5ms","1ms","2ms","5ms","10ms","20ms","50ms"];
+  const trig_str       = ["AUTO","SNGL","NORM"];
+
+  /* ---- "SPI" accounting: SPI5 = APB2 48MHz / prescaler 2 = 24 Mbit/s ---- */
+  const SPI_BITS_PER_SEC = 24e6;
+  let px_count = 0, spi_bytes = 0;
+  function busBurst(cmd_bytes, data_bytes) { spi_bytes += cmd_bytes + data_bytes; }
+
+  /* ---- framebuffer + driver primitives ----------------------------------- */
+  const fb = new Uint16Array(SCREEN_W * SCREEN_H);
+
+  function setRotation(rot) {            // ILI9341_Set_Rotation()
+    if (rot === 1) { LCD_W = 320; LCD_H = 240; }   // SCREEN_HORIZONTAL_1
+    else           { LCD_W = 240; LCD_H = 320; }
+  }
+  function fillScreen(c) {
+    fb.fill(c); px_count += LCD_W * LCD_H; busBurst(11, LCD_W * LCD_H * 2);
+  }
+  function drawPixel(x, y, c) {          // ILI9341_Draw_Pixel()
+    if ((x >= LCD_W) || (y >= LCD_H)) return;
+    fb[y * SCREEN_W + x] = c; px_count++; busBurst(9, 2 + 4);
+  }
+  function drawRectangle(x, y, w, h, c) { // ILI9341_Draw_Rectangle()
+    if ((x >= LCD_W) || (y >= LCD_H)) return;
+    if ((x + w - 1) >= LCD_W) w = LCD_W - x;
+    if ((y + h - 1) >= LCD_H) h = LCD_H - y;
+    for (let yy = 0; yy < h; yy++)
+      for (let xx = 0; xx < w; xx++) fb[(y + yy) * SCREEN_W + (x + xx)] = c;
+    px_count += w * h; busBurst(11, w * h * 2);
+  }
+  function drawFilledRectCoord(x0, y0, x1, y1, c) {  // length = X1-X0 (ไม่มี +1!)
+    const negx = (x1 - x0) < 0, negy = (y1 - y0) < 0;
+    const xl = negx ? (x0 - x1) : (x1 - x0), xa = negx ? x1 : x0;
+    const yl = negy ? (y0 - y1) : (y1 - y0), ya = negy ? y1 : y0;
+    drawRectangle(xa, ya, xl, yl, c);
+  }
+  function drawHLine(x, y, w, c) {       // ILI9341_Draw_Horizontal_Line()
+    if ((x >= LCD_W) || (y >= LCD_H)) return;
+    if ((x + w - 1) >= LCD_W) w = LCD_W - x;
+    for (let i = 0; i < w; i++) fb[y * SCREEN_W + (x + i)] = c;
+    px_count += w; busBurst(11, w * 2);
+  }
+  function drawChar(ch, X, Y, colour, size, bg) {     // ILI9341_Draw_Char()
+    let fc = ch.charCodeAt(0);
+    if (fc < 32) { ch = ' '; fc = 32; }
+    fc -= 32;
+    if (fc < 0 || fc > 95) fc = 0;
+    drawRectangle(X, Y, 6 * size, 8 * size, bg);
+    for (let j = 0; j < 6; j++) {
+      const col = FONT[fc][j] || 0;
+      for (let i = 0; i < 8; i++) {
+        if (col & (1 << i)) {
+          if (size === 1) drawPixel(X + j, Y + i, colour);
+          else drawRectangle(X + j * size, Y + i * size, size, size, colour);
+        }
+      }
+    }
+  }
+  function drawText(text, X, Y, colour, size, bg) {   // ILI9341_Draw_Text(): X เป็น uint8_t!
+    for (let k = 0; k < text.length; k++) {
+      drawChar(text[k], X, Y, colour, size, bg);
+      X = (X + 6 * size) & 0xFF;      // <-- จุดที่ตัวอักษร "วนกลับ" มาซ้ายจอ
+    }
+  }
+
+  /* ---- app state (main.c) ------------------------------------------------ */
+  const raw     = new Int16Array(N_SAMPLES);
+  const new_x   = new Int16Array(N_SAMPLES);
+  const old_y   = new Int16Array(N_SAMPLES);
+  const new_y   = new Int16Array(N_SAMPLES);
+  let n_pts     = N_SAMPLES;
+
+  const meas = { vmax: 0, vmin: 0, vpp: 0, vrms: 0, freq: 0, dc_offset: 0 };
+
+  let CENTER_Y = 120, GRID_Y_OFFSET = 20;   // 120 ตามโค้ดจริง (กลางจริงคือ 129)
+  let vdiv_idx = 1, volts_per_div = 1.0;
+  let timediv_idx = 1;
+  let trigger_mode = 0, hold_active = 0, single_captured = 0;
+  let cursor_x = SCREEN_W / 2;
+  let phase = 0.0;
+  let last_frame_tick = 0, last_header_tick = 0;
+
+  const opt = { fixCenter: false, fixRms: false, fixClear: false, fixLong: false, noWrap: false, realSignal: false };
+
+  const btns = {
+    up:   { is_held: 0, last_press: 0, held_since: 0, long_fired: 0 },
+    down: { is_held: 0, last_press: 0, held_since: 0, long_fired: 0 },
+    hold: { is_held: 0, last_press: 0, held_since: 0, long_fired: 0 },
+    set:  { is_held: 0, last_press: 0, held_since: 0, long_fired: 0 }
+  };
+  /* raw switch states driven by the UI (1 = pressed) */
+  const rawBtn = { up: 0, down: 0, hold: 0, set: 0 };
+
+  /* ---- signal sources ---------------------------------------------------- */
+  function generateMock() {                       // GenerateFakeSineWave()
+    for (let i = 0; i < N_SAMPLES; i++) {
+      const angle = (2.0 * Math.PI * i / N_SAMPLES) + phase;
+      raw[i] = Math.trunc(ADC_MID + 1800.0 * Math.sin(angle));
+    }
+    phase += 0.15;
+    if (phase >= 2.0 * Math.PI) phase -= 2.0 * Math.PI;
+
+    const peak_v = 1800.0 * ADC_VREF / ADC_FULL;  // ~1.45 V
+    meas.vmax = peak_v; meas.vmin = -peak_v; meas.vpp = peak_v * 2.0;
+    meas.vrms = peak_v * 0.7071; meas.freq = 1000.0; meas.dc_offset = 0.0;
+  }
+  function generateReal(nowMs) {                  // จำลอง ADC จริง: off-frequency + noise + DC
+    const fs = 120000.0;                          // Hz (สมมติ 120 kSa/s)
+    const f  = 1750.0;                            // Hz -> 3.5 คาบ/buffer (ครึ่งคาบ = รอยหักชัดสุด)
+    let vmax = -1e9, vmin = 1e9, sum2 = 0, dc = 0;
+    const t0 = nowMs / 1000.0;
+    for (let i = 0; i < N_SAMPLES; i++) {
+      const t = t0 + i / fs;
+      const noise = (Math.sin(i * 12.9898 + nowMs * 0.017) * 43758.5453 % 1) * 24.0;
+      let s = ADC_MID + 250.0 + 1500.0 * Math.sin(2 * Math.PI * f * t) + noise;
+      s = Math.max(0, Math.min(4095, s));
+      raw[i] = Math.trunc(s);
+      const v = (raw[i] - ADC_MID) * ADC_VREF / ADC_FULL;
+      if (v > vmax) vmax = v; if (v < vmin) vmin = v;
+      sum2 += v * v; dc += v;
+    }
+    meas.vmax = vmax; meas.vmin = vmin; meas.vpp = vmax - vmin;
+    meas.vrms = Math.sqrt(sum2 / N_SAMPLES); meas.freq = f; meas.dc_offset = dc / N_SAMPLES;
+  }
+
+  /* ---- rendering (main.c) ------------------------------------------------ */
+  function findTrigger() {                        // FindTrigger()
+    const limit = (N_SAMPLES * 3) / 4;            // 180
+    for (let i = 1; i < limit; i++)
+      if (raw[i - 1] < ADC_MID && raw[i] >= ADC_MID) return i;
+    return 0;
+  }
+  function mapToScreen(trig_offset) {             // MapToScreen()
+    const avail = N_SAMPLES - trig_offset;
+    if (opt.noWrap) {
+      n_pts = Math.max(avail, 2);
+      for (let i = 0; i < n_pts; i++) {
+        const src = trig_offset + i;
+        const v = (raw[src] - ADC_MID) * ADC_VREF / ADC_FULL;
+        let y = CENTER_Y - Math.trunc(v / volts_per_div * GRID_Y_STEP);
+        if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
+        if (y >= SCREEN_H) y = SCREEN_H - 1;
+        new_x[i] = Math.trunc(i * (SCREEN_W - 1) / (n_pts - 1));
+        new_y[i] = y;
+      }
+    } else {
+      n_pts = N_SAMPLES;
+      for (let i = 0; i < N_SAMPLES; i++) {
+        let src = trig_offset + i;
+        if (src >= N_SAMPLES) src -= N_SAMPLES;   // wrap around buffer
+        const v = (raw[src] - ADC_MID) * ADC_VREF / ADC_FULL;
+        let y = CENTER_Y - Math.trunc(v / volts_per_div * GRID_Y_STEP);
+        if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
+        if (y >= SCREEN_H) y = SCREEN_H - 1;
+        new_x[i] = Math.trunc(i * SCREEN_W / N_SAMPLES);
+        new_y[i] = y;
+      }
+    }
+  }
+  function drawGrid() {                            // DrawGrid()
+    for (let y = GRID_Y_OFFSET; y < SCREEN_H; y += GRID_Y_STEP)
+      for (let x = 0; x < SCREEN_W; x += GRID_X_DOT)
+        drawPixel(x, y, C_DARKGREY);
+  }
+  function drawLineBresenham(x0, y0, x1, y1, color) {   // DrawLineBresenham()
+    const dx = Math.abs(x1 - x0), sx = (x0 < x1) ? 1 : -1;
+    const dy = -Math.abs(y1 - y0), sy = (y0 < y1) ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      let draw_color = color;
+      if (color === C_BLACK) {
+        if (x0 === cursor_x && y0 >= WAVEFORM_TOP) draw_color = C_DARKCYAN;
+        else if ((y0 % GRID_Y_STEP === GRID_Y_OFFSET) && (x0 % GRID_X_DOT === 0)) draw_color = C_DARKGREY;
+      }
+      drawPixel(x0, y0, draw_color);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+  function drawCursor() {                          // DrawCursor()
+    for (let y = WAVEFORM_TOP; y < SCREEN_H; y++) drawPixel(cursor_x, y, C_DARKCYAN);
+  }
+  function drawWaveform() {                        // DrawWaveform()
+    for (let i = 0; i < n_pts - 1; i++) {
+      drawLineBresenham(new_x[i], old_y[i], new_x[i + 1], old_y[i + 1], C_BLACK);
+      drawLineBresenham(new_x[i], new_y[i], new_x[i + 1], new_y[i + 1], C_YELLOW);
+    }
+    old_y.set(new_y.subarray(0, N_SAMPLES));
+  }
+  function drawTopPanel() {                        // DrawTopPanel()
+    // โค้ดจริง: ล้างถึง HEADER_H-2 = 17 → ครอบ y=0..16, x=0..318 (ขาด 1 แถว/1 คอลัมน์)
+    // เพราะ ILI9341_Draw_Filled_Rectangle_Coord คิด length = X1-X0 (ไม่มี +1)
+    if (opt.fixClear) drawFilledRectCoord(0, 0, SCREEN_W, HEADER_H, C_BLACK);
+    else              drawFilledRectCoord(0, 0, SCREEN_W - 1, HEADER_H - 2, C_BLACK);
+
+    drawText("V:" + volts_per_div.toFixed(1) + "V/d", 2, 1, C_YELLOW, 1, C_BLACK);
+    drawText("T:" + timediv_labels[timediv_idx] + "/d", 72, 1, C_WHITE, 1, C_BLACK);
+    drawText((trigger_mode === 1 && single_captured) ? "DONE" : trig_str[trigger_mode], 148, 1, C_CYAN, 1, C_BLACK);
+    if (hold_active) drawText("HOLD", 210, 1, C_RED, 1, C_BLACK);
+    else if (trigger_mode === 1 && !single_captured) drawText("WAIT", 210, 1, C_ORANGE, 1, C_BLACK);
+    else drawText("RUN ", 210, 1, C_GREEN, 1, C_BLACK);
+
+    drawText("Vp:" + meas.vpp.toFixed(2) + "V", 2, 10, C_CYAN, 1, C_BLACK);
+    drawText(meas.freq >= 1000.0 ? ("F:" + (meas.freq / 1000).toFixed(1) + "kHz")
+                                 : ("F:" + meas.freq.toFixed(0) + "Hz"), 68, 10, C_GREEN, 1, C_BLACK);
+    drawText("Mx:" + meas.vmax.toFixed(2) + "V", 130, 10, C_LIGHTGREY, 1, C_BLACK);
+    drawText("Mn:" + meas.vmin.toFixed(2) + "V", 188, 10, C_LIGHTGREY, 1, C_BLACK);
+    drawText("Rs:" + meas.vrms.toFixed(2), opt.fixRms ? 214 : 245, 10, C_LIGHTGREY, 1, C_BLACK);
+
+    drawHLine(0, HEADER_H - 1, SCREEN_W, C_DARKGREY);
+  }
+  function autoScale() {                           // AutoScale()
+    const vpp = meas.vpp;
+    if (vpp < 0.01) return;
+    const ideal = vpp / 4.0;
+    for (let i = 0; i < VDIV_COUNT; i++)
+      if (vdiv_table[i] >= ideal) { vdiv_idx = i; volts_per_div = vdiv_table[i]; return; }
+    vdiv_idx = VDIV_COUNT - 1; volts_per_div = vdiv_table[VDIV_COUNT - 1];
+  }
+
+  /* ---- buttons ----------------------------------------------------------- */
+  function justPressed(name, now) {                // ButtonJustPressed()
+    const b = btns[name], rawv = rawBtn[name];
+    if (rawv) {
+      if (!b.is_held) {
+        b.is_held = 1; b.held_since = now; b.long_fired = 0;
+        if (now - b.last_press >= BTN_DEBOUNCE_MS) { b.last_press = now; return 1; }
+      }
+    } else { b.is_held = 0; b.long_fired = 0; }
+    return 0;
+  }
+  function longPress(name, now) {                  // ButtonLongPress()
+    const b = btns[name];
+    if (b.is_held && !b.long_fired && (now - b.held_since >= BTN_LONG_MS)) { b.long_fired = 1; return 1; }
+    return 0;
+  }
+  function released(name, now) {
+    const b = btns[name];
+    return (!rawBtn[name] && b.is_held);
+  }
+  function handleButtons(now) {                    // HandleButtons()
+    if (justPressed('up', now))   { if (vdiv_idx < VDIV_COUNT - 1) { vdiv_idx++; volts_per_div = vdiv_table[vdiv_idx]; } }
+    if (justPressed('down', now)) { if (vdiv_idx > 0) { vdiv_idx--; volts_per_div = vdiv_table[vdiv_idx]; } }
+    if (justPressed('hold', now)) {
+      if (trigger_mode === 1 && single_captured) { single_captured = 0; hold_active = 0; }
+      else hold_active = hold_active ? 0 : 1;
+    }
+    if (opt.fixLong) {
+      if (released('set', now) && !btns.set.long_fired) { trigger_mode = (trigger_mode + 1) % 3; single_captured = 0; hold_active = 0; }
+      if (longPress('set', now)) autoScale();
+    } else {
+      if (justPressed('set', now)) { trigger_mode = (trigger_mode + 1) % 3; single_captured = 0; hold_active = 0; }
+      if (longPress('set', now)) autoScale();
+    }
+  }
+
+  /* ---- init / loop ------------------------------------------------------- */
+  function init() {
+    setRotation(1);
+    fillScreen(C_BLACK);
+    old_y.fill(CENTER_Y);
+    drawGrid(); drawCursor(); drawTopPanel();
+    last_frame_tick = 0; last_header_tick = 0;
+    phase = 0;
+  }
+  function resetCounters() { px_count = 0; spi_bytes = 0; }
+
+  function loop(now) {                             // while(1) ใน main.c
+    handleButtons(now);
+
+    if (now - last_frame_tick >= FRAME_MS) {
+      last_frame_tick = now;
+      let should_draw = 0;
+      if      (trigger_mode === 0) should_draw = !hold_active;
+      else if (trigger_mode === 2) should_draw = !hold_active;
+      else if (trigger_mode === 1) should_draw = (!hold_active && !single_captured);
+
+      if (should_draw) {
+        if (opt.realSignal) generateReal(now); else generateMock();
+        const trig = findTrigger();
+        mapToScreen(trig);
+        drawWaveform();
+        if (trigger_mode === 1) { single_captured = 1; hold_active = 1; }
+      }
+    }
+    if (now - last_header_tick >= HEADER_MS) { last_header_tick = now; drawTopPanel(); }
+  }
+
+  function stats() {
+    return {
+      px_per_frame: px_count,
+      spi_bytes: spi_bytes,
+      spi_ms: spi_bytes * 8 / SPI_BITS_PER_SEC * 1000,
+      n_pts: n_pts, vdiv: volts_per_div, tdiv: timediv_labels[timediv_idx],
+      mode: trig_str[trigger_mode], hold: hold_active, single: single_captured,
+      vpp: meas.vpp, vrms: meas.vrms, vmax: meas.vmax, vmin: meas.vmin, freq: meas.freq,
+      center: CENTER_Y, gridoff: GRID_Y_OFFSET
+    };
+  }
+
+  return {
+    init: init, loop: loop, stats: stats, resetCounters: resetCounters, drawTopPanel: drawTopPanel, findTrigger: findTrigger, drawWaveform: drawWaveform,
+    fb: fb, new_y: new_y, new_x: new_x, old_y: old_y, raw: raw,
+    opt: opt, rawBtn: rawBtn, btns: btns,
+    setOptions: function (o) {
+      Object.assign(opt, o);
+      CENTER_Y = opt.fixCenter ? 129 : 120;
+      GRID_Y_OFFSET = opt.fixCenter ? 9 : 20;
+      btns.up.is_held = btns.down.is_held = btns.hold.is_held = btns.set.is_held = 0;
+    },
+    SCREEN_W: SCREEN_W, SCREEN_H: SCREEN_H
+  };
+})();
+//>>>CORE
+
+/* ============================== UI ======================================= */
+(function () {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(320, 240);
+  const hud = document.getElementById('hud');
+
+  function rgb565to888(c) {
+    const r = (c >> 11) & 0x1F, g = (c >> 5) & 0x3F, b = c & 0x1F;
+    return [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)];
+  }
+  function blit() {
+    const fb = SIM_CORE.fb, d = img.data;
+    for (let i = 0, p = 0; i < fb.length; i++, p += 4) {
+      const c = rgb565to888(fb[i]);
+      d[p] = c[0]; d[p + 1] = c[1]; d[p + 2] = c[2]; d[p + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  /* --- buttons: pointerdown/up map to the same raw switch states --- */
+  const map = { bUp: 'up', bDown: 'down', bHold: 'hold', bSet: 'set' };
+  for (const id in map) {
+    const el = document.getElementById(id), key = map[id];
+    const down = e => { e.preventDefault(); SIM_CORE.rawBtn[key] = 1; el.classList.add('on'); };
+    const up   = e => { e.preventDefault(); SIM_CORE.rawBtn[key] = 0; el.classList.remove('on'); };
+    el.addEventListener('pointerdown', down);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointerleave', up);
+    el.addEventListener('pointercancel', up);
+  }
+
+  /* --- toggles --- */
+  function toggle(id, fn) {
+    const el = document.getElementById(id);
+    el.addEventListener('click', () => { fn(!el.classList.contains('on')); el.classList.toggle('on'); });
+  }
+  toggle('dReal', v => SIM_CORE.setOptions({ realSignal: v }));
+  toggle('aCenter', v => SIM_CORE.setOptions({ fixCenter: v }));
+  toggle('aRms', v => SIM_CORE.setOptions({ fixRms: v }));
+  toggle('aClear', v => SIM_CORE.setOptions({ fixClear: v }));
+  toggle('aLong', v => SIM_CORE.setOptions({ fixLong: v }));
+  toggle('aWrap', v => SIM_CORE.setOptions({ noWrap: v }));
+  document.getElementById('dMock').addEventListener('click', () => {
+    document.getElementById('dReal').classList.remove('on');
+    SIM_CORE.setOptions({ realSignal: false });
+  });
+
+  SIM_CORE.init();
+
+  let simT = 0, lastWall = performance.now(), frames = 0, fpsT = lastWall;
+  function animate(wall) {
+    const dt = Math.min(wall - lastWall, 100); lastWall = wall;
+    simT += dt;
+    SIM_CORE.resetCounters();
+    SIM_CORE.loop(simT);            // one pass of while(1) per rendered frame
+    blit();
+    frames++;
+    if (wall - fpsT > 500) {
+      const s = SIM_CORE.stats();
+      const warn = (!SIM_CORE.opt.fixRms) ? '<span class="bad">RMS วาดที่ x=245 → ตัวอักษรตัวที่ 3 วนไป x=1 (ทับ Vpp)</span>' : '<span class="ok">RMS ย้ายไป x=214 → ไม่วน</span>';
+      hud.innerHTML =
+        'V/div <b>' + s.vdiv.toFixed(1) + '</b> V &nbsp;·&nbsp; T/div <b>' + s.tdiv + '</b> &nbsp;·&nbsp; mode <b>' + s.mode + '</b>' +
+        (s.hold ? ' &nbsp;·&nbsp; <b>HOLD</b>' : '') + (s.single ? ' &nbsp;·&nbsp; SINGLE captured' : '') +
+        ' &nbsp;·&nbsp; CENTER_Y <b>' + s.center + '</b> (กลางจริง 129) &nbsp;·&nbsp; grid offset <b>' + s.gridoff + '</b>' +
+        '<br>Vpp <b>' + s.vpp.toFixed(2) + ' V</b> · RMS <b>' + s.vrms.toFixed(2) + ' V</b> · Mx <b>' + s.vmax.toFixed(2) + '</b> · Mn <b>' + s.vmin.toFixed(2) + '</b> · F <b>' + s.freq.toFixed(0) + ' Hz</b>' +
+        '<br>พิกเซลที่เขียน <b>' + s.px_per_frame + '</b> px ต่อ pass &nbsp;·&nbsp; SPI (24 Mbit/s) <b>' + s.spi_ms.toFixed(2) + ' ms</b> ต่อ pass &nbsp;(ตัวเลข SPI ยังไม่รวม overhead ของ HAL/ฟังก์ชัน)' +
+        '<br>' + warn + ' &nbsp;·&nbsp; ' + (SIM_CORE.opt.realSignal ? 'สัญญาณจริงจำลอง' : 'sine ปลอม (mock)') + ' &nbsp;·&nbsp; ' + (SIM_CORE.opt.noWrap ? '<span class="ok">ไม่ wrap buffer</span>' : '<span class="bad">wrap buffer ตามโค้ดจริง</span>');
+      fpsT = wall;
+    }
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

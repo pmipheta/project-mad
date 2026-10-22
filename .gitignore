@@ -1,0 +1,24 @@
+# Build outputs
+Debug/
+Release/
+
+# STM32CubeIDE generated/local metadata
+.settings/language.settings.xml
+
+# Local backups and generated analysis files
+*.bak
+*.bak*
+*.adckeep
+*.p*keep*
+*.broken*
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.map
+*.list
+
+# OS/editor files
+.DS_Store
+.vscode/
