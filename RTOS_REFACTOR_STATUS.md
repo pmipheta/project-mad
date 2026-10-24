@@ -1,8 +1,8 @@
 # FreeRTOS refactor - status (2026-10-24, branch RTOS-fix-not-test)
 
 ## WARNING: this branch is NOT tested on the board
-Everything below "v77" and "v78" was built and checked on a PC only (ARM build OK,
-`python3 tests/run_all.py` = 0 of 16 suites failed, SLOW block byte-identical).
+Everything below "v77", "v78" and "v79" was built and checked on a PC only (ARM build OK,
+`python3 tests/run_all.py` = 0 of 17 suites failed, SLOW block byte-identical).
 It has never run on the NUCLEO-F767ZI. The last hardware-verified version is v76
 (`main` / `feature/rtos-refactor`). If the board misbehaves, flash v76 back.
 
@@ -25,6 +25,15 @@ It has never run on the NUCLEO-F767ZI. The last hardware-verified version is v76
 - Expected (estimate, not measured): small column ~70 us -> ~10 us, cursor pixel 58 -> 6 us.
 - Rollback without other changes: `#define LCD_FAST_SPI 0` in `lcd_fast.h`.
 - Test: `tests/test_fast_lcd.py` compares the byte stream of old and new code.
+
+## v79 - uniform button debounce (not board-tested)
+- All 9 inputs (8 buttons + PC13) go through one time-based filter `Debounce()`:
+  a press or release only counts after the pin read the new level for 20 ms in a row
+  (`BTN_STABLE_MS`). Contact bounce or a single noise spike no longer fires an action twice.
+- All older rules stay on top (200 ms lockout, 30 ms release, 40 ms minimum press, long presses).
+- Cost: every press/release reacts about 20 ms later; pulses shorter than 20 ms are ignored.
+- Test: `tests/test_debounce.py` (random chatter at press/release/mid-hold, noise spikes,
+  hold-repeat counts, 80 ms fallback cadence) - fails on v78, passes on v79.
 
 ## How to test on the board
 1. Back up the flash, flash this build.

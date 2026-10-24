@@ -135,6 +135,7 @@
 #define BTN_ACCEL_MS        1500u    /*      ... and after this long ...                                */
 #define BTN_ACCEL_STEPS     3        /*      ... 3 steps per repeat                                      */
 #define BTN_REL_MS          30u      /* v54: a release must read stable this long (contact bounce)      */
+#define BTN_STABLE_MS       20u      /* v79: uniform input debounce: a level change is accepted only after the raw pin differed continuously this long */
 
 /* --- Debug: แสดง FPS จริงบนจอ (1 = เปิด, 0 = ปิด) --- */
 #define SHOW_FPS        1
@@ -156,6 +157,13 @@ typedef struct {
     float dc_offset;
 } OscMeasure;
 
+/* v79: per-input debouncer (level 1 = pressed). Zero-initialised = released. */
+typedef struct {
+    uint8_t  level;      /* debounced level */
+    uint8_t  pend;       /* 1 = raw differs from level, waiting BTN_STABLE_MS */
+    uint32_t since;      /* tick when raw first differed */
+} Debouncer;
+
 /* Button state for debouncing */
 typedef struct {
     GPIO_TypeDef *port;
@@ -167,6 +175,7 @@ typedef struct {
     uint32_t      next_rep_tick;    /* v54: next auto-repeat of a held UP/DOWN  */
     uint32_t      low_tick;         /* v54: tick when the pin first read released (release debounce) */
     uint8_t       low_pending;      /* v54: 1 = pin reads released, waiting BTN_REL_MS to be sure */
+    Debouncer     db;               /* v79: input debouncer (appended last) */
 } Button;
 
 /* USER CODE END PTD */
@@ -273,7 +282,7 @@ static void     DrawWaveform(void);
 static void     DrawTopPanel(void);
 static void     DrawSettingBar(void);
 static void     AutoScale(void);
-static uint8_t  ButtonJustPressed(Button *btn, uint32_t now);
+static uint8_t  ButtonJustPressed(Button *btn, uint8_t raw, uint32_t now);
 static uint8_t  ButtonLongPress(Button *btn, uint32_t now);
 static void     HandleButtons(uint32_t now);
 #if SHOW_FPS
@@ -2027,15 +2036,24 @@ static void AutoScale(void)
 {
     OscAutoScale();
 }
+/* v79: time-based debounce for every input. The debounced level changes only after raw has differed from it continuously for >= BTN_STABLE_MS;
+ * any sample equal to the current level cancels the pending change. Call exactly once per input per sample. */
+static uint8_t Debounce(Debouncer *d, uint8_t raw, uint32_t now)
+{
+    raw = raw ? 1u : 0u;
+    if (raw == d->level) d->pend = 0;
+    else if (!d->pend) { d->pend = 1; d->since = now; }
+    else if ((now - d->since) >= BTN_STABLE_MS) { d->level = raw; d->pend = 0; }
+    return d->level;
+}
+
 /* --------------------------------------------------------------------------
  * ButtonJustPressed
  * Returns 1 on the first confirmed press (rising edge with debounce).
  * Active-LOW buttons: GPIO reads 0 when pressed.
  * -------------------------------------------------------------------------- */
-static uint8_t ButtonJustPressed(Button *btn, uint32_t now)
+static uint8_t ButtonJustPressed(Button *btn, uint8_t raw, uint32_t now)
 {
-    uint8_t raw = (HAL_GPIO_ReadPin(btn->port, btn->pin) == GPIO_PIN_RESET) ? 1 : 0;
-
     if (raw) {
         if (!btn->is_held) {
             /* Transition to pressed */
@@ -2092,9 +2110,9 @@ static int ButtonRepeat(Button *b, uint8_t raw, uint32_t now)
     return 0;
 }
 
-static uint8_t ButtonRaw(const Button *b)
+static uint8_t ButtonRaw(Button *b, uint32_t now)
 {
-    return (HAL_GPIO_ReadPin(b->port, b->pin) == GPIO_PIN_RESET) ? 1u : 0u;   /* active LOW */
+    return Debounce(&b->db, (HAL_GPIO_ReadPin(b->port, b->pin) == GPIO_PIN_RESET) ? 1u : 0u, now);   /* active LOW, v79: debounced */
 }
 
 /* --------------------------------------------------------------------------
@@ -2126,25 +2144,25 @@ static void ButtonSample(uint32_t now)
     int n;
 
     /* v61: PB0 = INCREASE, PB1 = DECREASE (hold-repeat as before; OscAdjust only, never move/zoom) */
-    if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) BtnEmit(BE_UP,   (uint8_t)n);
-    if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) BtnEmit(BE_DOWN, (uint8_t)n);
+    if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up, now), now)) > 0) BtnEmit(BE_UP,   (uint8_t)n);
+    if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down, now), now)) > 0) BtnEmit(BE_DOWN, (uint8_t)n);
 
     /* PB2 = AUTO (one-shot auto scale) */
-    if (ButtonJustPressed(&btn_hold, now)) BtnEmit(BE_AUTO, 0);
+    if (ButtonJustPressed(&btn_hold, ButtonRaw(&btn_hold, now), now)) BtnEmit(BE_AUTO, 0);
     (void)ButtonLongPress;
 
     /* v62: PA3 = toggle V/DIV <-> T/DIV select; PC0 = toggle FILTER <-> TRIG select (no-op where the target does not exist, e.g. frozen) */
-    if (ButtonJustPressed(&btn_vdiv, now)) BtnEmit(BE_VDIV, 0);
-    if (ButtonJustPressed(&btn_tdiv, now)) BtnEmit(BE_TDIV, 0);
+    if (ButtonJustPressed(&btn_vdiv, ButtonRaw(&btn_vdiv, now), now)) BtnEmit(BE_VDIV, 0);
+    if (ButtonJustPressed(&btn_tdiv, ButtonRaw(&btn_tdiv, now), now)) BtnEmit(BE_TDIV, 0);
 
     /* v64: PF3 = true FREEZE toggle (ActFreeze, same as UART 'h') */
-    if (ButtonJustPressed(&btn_trig, now)) BtnEmit(BE_FREEZE, 0);
+    if (ButtonJustPressed(&btn_trig, ButtonRaw(&btn_trig, now), now)) BtnEmit(BE_FREEZE, 0);
 
     /* v62: PC3 = short (on release) FREEZE | held BTN_CURSOR_LONG_MS (fires once) toggle C1<->C2 cursor (only while frozen: checked at dispatch). Same pattern as PB3 below. */
     {
         static uint8_t  cu_prev = 0, cu_long = 0;
         static uint32_t cu_t0 = 0;
-        uint8_t pressed = ButtonRaw(&btn_filt);
+        uint8_t pressed = ButtonRaw(&btn_filt, now);
         if (pressed && !cu_prev) { cu_t0 = now; cu_long = 0; }
         if (pressed && !cu_long && (now - cu_t0) >= BTN_CURSOR_LONG_MS) {
             cu_long = 1;
@@ -2158,7 +2176,7 @@ static void ButtonSample(uint32_t now)
     {
         static uint8_t  fs_prev = 0, fs_long = 0;
         static uint32_t fs_t0 = 0;
-        uint8_t pressed = ButtonRaw(&btn_set);
+        uint8_t pressed = ButtonRaw(&btn_set, now);
         if (pressed && !fs_prev) { fs_t0 = now; fs_long = 0; }
         if (pressed && !fs_long && (now - fs_t0) >= BTN_MAN_LONG_MS) { fs_long = 1; BtnEmit(BE_AUTOMODE, 0); }
         if (!pressed && fs_prev && !fs_long && (now - fs_t0) >= 40u) BtnEmit(BE_FASTSLOW, 0);
@@ -2169,7 +2187,8 @@ static void ButtonSample(uint32_t now)
     {
         static uint8_t  man_prev = 0, man_long = 0;
         static uint32_t man_t0 = 0;
-        uint8_t pressed = (HAL_GPIO_ReadPin(BTN_MAN_PORT, BTN_MAN_PIN) == (BTN_MAN_ACTIVE_HIGH ? GPIO_PIN_SET : GPIO_PIN_RESET)) ? 1u : 0u;
+        static Debouncer man_db;
+        uint8_t pressed = Debounce(&man_db, (HAL_GPIO_ReadPin(BTN_MAN_PORT, BTN_MAN_PIN) == (BTN_MAN_ACTIVE_HIGH ? GPIO_PIN_SET : GPIO_PIN_RESET)) ? 1u : 0u, now);
         if (pressed && !man_prev) { man_t0 = now; man_long = 0; }
         if (pressed && !man_long && (now - man_t0) >= BTN_MAN_LONG_MS) { man_long = 1; BtnEmit(BE_AUTOMODE, 0); }
         if (!pressed && man_prev && !man_long && (now - man_t0) >= 40u) BtnEmit(BE_FASTSLOW, 0);

@@ -273,7 +273,7 @@ harness = harness.replace('@@FILL@@', macro('OSC_V_FILL_DIVS'))
 (OUT/'uart_dummy.c').write_text('')
 (OUT/'buttons.c').write_text(harness)
 # Button type + ButtonRepeat deps from the real file
-btn_t = src[src.index('typedef struct {\n    GPIO_TypeDef *port;'):src.index('} Button;')+len('} Button;')]
+btn_t = src[src.index('/* v79: per-input debouncer'):src.index('} Button;')+len('} Button;')]
 btn_t = btn_t.replace('GPIO_TypeDef *port;', 'void *port;')
 defs = ''.join('#define %s %s\n' % (m, macro(m)) for m in ['BTN_REPEAT_FIRST_MS', 'BTN_REPEAT_MS', 'BTN_ACCEL_MS', 'BTN_ACCEL_STEPS', 'BTN_REL_MS'])
 (OUT/'buttons.c').write_text((OUT/'buttons.c').read_text().replace('#include <math.h>\n', '#include <math.h>\n' + btn_t + '\n' + defs, 1))

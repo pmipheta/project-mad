@@ -128,12 +128,12 @@ if bt is not None:
         while d: d += (t[q]=='{') - (t[q]=='}'); q += 1
         return t[a:q]
     for name in ['OscMeasureFrame', 'AdcCaptureFrame', 'OscAutoTimebase', 'OscManualToggle', 'OscAutoApply', 'OscAutoScaleStep', 'OscAutoPickTdiv', 'ActToggleFastSlow', 'ActAutoMode', 'OscAutoRearm', 'OscAdjust']:
-        a_, b_ = fn(src, name), fn(bt, name)
+        a_, b_ = fn(src.replace('ButtonJustPressed(Button *btn, uint8_t raw, uint32_t now);', 'ButtonJustPressed(Button *btn, uint32_t now);'), name), fn(bt, name)   # v79: fn() also swallows the prototype list; normalise the one changed prototype
         if name == 'OscAutoApply':   # v73: only the default index became the named constant OSC_VDIV_DEF (1 V/div)
             a_ = re.sub(r'\s+', ' ', a_.replace('OSC_VDIV_DEF', '3')); b_ = re.sub(r'\s+', ' ', b_)
         contracts.append(('function unchanged vs v56: '+name, a_ == b_))
     diff = [l for l in difflib.unified_diff(bt.splitlines(), src.splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
-    contracts.append(('whole-file diff vs v56 is small (<= 400 changed lines incl. RTOS v65-v71, V/DIV range v73, edge filter v74/v76, grid v75; the tight v57 contract is in test_zoom): %d' % len(diff), len(diff) <= 400))
+    contracts.append(('whole-file diff vs v56 is small (<= 430 changed lines incl. RTOS v65-v71, v79 debounce +~30, V/DIV range v73, edge filter v74/v76, grid v75; the tight v57 contract is in test_zoom): %d' % len(diff), len(diff) <= 430))
 cfail = sum(not ok for _, ok in contracts)
 for n, ok in contracts: print(('PASS ' if ok else 'FAIL ') + n)
 print('contract failures=%d' % cfail)

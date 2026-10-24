@@ -17,13 +17,13 @@ def function(name):
     while d:
         d += (nocom[i] == '{') - (nocom[i] == '}'); i += 1
     return nocom[m.start():i]
-names = ['ButtonJustPressed','ButtonRepeat','ButtonRaw','HandleButtons','ActIncrease','ActDecrease','ActUp','ActDown','ActSelectSetting','ActToggleTrigEdge','OscSetIndex','OscSetName','ActToggleStable']
+names = ['Debounce','ButtonJustPressed','ButtonRepeat','ButtonRaw','HandleButtons','ActIncrease','ActDecrease','ActUp','ActDown','ActSelectSetting','ActToggleTrigEdge','OscSetIndex','OscSetName','ActToggleStable']
 raw3 = unlock((ROOT/'Core/Src/main.c').read_text())      # v77: HandleButtons is compiled as the REAL sampler+dispatch (fake queue), not the reconstructed combined text
 nocom3 = bh.strip_comments(raw3)
 funcs = '\n'.join(function(n) for n in names if n != 'HandleButtons') + '\n' + '\n'.join(bh.func_text(nocom3, n) for n in bh.split_names(raw3) + ['HandleButtons'])
 macros = '\n'.join(re.search(r'^#define '+n+r'\s+[^/\n]+', nocom, re.M)[0] for n in
   ['BTN_CURSOR_LONG_MS','BTN_UP_PIN','BTN_DOWN_PIN','BTN_HOLD_PIN','BTN_SET_PIN','BTN_VDIV_PIN','BTN_TDIV_PIN','BTN_FILT_PIN','BTN_TRIG_PIN','BTN_MAN_LONG_MS','BTN_DEBOUNCE_MS','BTN_LONG_MS',
-   'BTN_REPEAT_FIRST_MS','BTN_REPEAT_MS','BTN_ACCEL_MS','BTN_ACCEL_STEPS','BTN_REL_MS','BTN_MAN_ACTIVE_HIGH'])
+   'BTN_REPEAT_FIRST_MS','BTN_REPEAT_MS','BTN_ACCEL_MS','BTN_ACCEL_STEPS','BTN_REL_MS','BTN_STABLE_MS','BTN_MAN_ACTIVE_HIGH'])
 names_line = re.search(r'static const char\s+\*osc_set_names\[\][^;]*;', nocom)[0] + re.search(r'static const char\s+\*osc_hold_names\[\][^;]*;', nocom)[0]
 c = r'''
 #include <stdio.h>
@@ -54,7 +54,8 @@ static GPIO_TypeDef PA, PB, PC, PF;
 #define BTN_MAN_PORT GPIOC
 #define BTN_MAN_PIN 0x2000
 ''' + macros + r'''
-typedef struct { GPIO_TypeDef *port; uint16_t pin; uint32_t last_press_tick, held_since_tick; uint8_t is_held, long_fired; uint32_t next_rep_tick, low_tick; uint8_t low_pending; } Button;
+typedef struct { uint8_t level, pend; uint32_t since; } Debouncer;   /* v79 */
+typedef struct { GPIO_TypeDef *port; uint16_t pin; uint32_t last_press_tick, held_since_tick; uint8_t is_held, long_fired; uint32_t next_rep_tick, low_tick; uint8_t low_pending; Debouncer db; } Button;
 static Button btn_up, btn_down, btn_hold, btn_set, btn_vdiv, btn_tdiv, btn_filt, btn_trig;
 ''' + names_line + r'''
 #define OSC_SET_COUNT 4
@@ -163,14 +164,15 @@ int main(void){
     CHECK("(h2) release: still frozen, stable untouched", hold_active==1 && osc_stable==1);
     press(2,8,1); run(1600); press(2,8,0); run(300); CHECK("(h2) second long: C2->C1", osc_sidx==0 && hold_active==1);
     CHECK("(h) none of the 4 pins call move/adjust", n_move==0 && n_adj_p==0 && n_adj_m==0);
-    /* PF3 debounce */
-    hold_active = 0; init(); osc_stable = 1; press(3,8,1); run(20); press(3,8,0); run(20); press(3,8,1); run(20); press(3,8,0); run(20);
+    /* PF3 debounce. v79: bounce pulses are 30 ms (was 20): a pulse shorter than BTN_STABLE_MS is now rejected by the input debouncer itself (covered in test_debounce.py);
+       30 ms pulses pass it, so the 200 ms ButtonJustPressed lockout is still what these cases exercise. */
+    hold_active = 0; init(); osc_stable = 1; press(3,8,1); run(30); press(3,8,0); run(30); press(3,8,1); run(30); press(3,8,0); run(30);
     CHECK("PF3: bounce within 200ms = one freeze toggle", hold_active==1 && n_freeze==1 && osc_stable==1);
     run(300); press(3,8,1); run(2000); CHECK("PF3: held press toggles freeze once only", hold_active==0 && n_freeze==2 && osc_stable==1); press(3,8,0); run(300);
     /* PA3/PC0 debounce */
-    hold_active = 0; init(); osc_sidx=0; press(0,8,1); run(20); press(0,8,0); run(20); press(0,8,1); run(20); press(0,8,0); run(20);
+    hold_active = 0; init(); osc_sidx=0; press(0,8,1); run(30); press(0,8,0); run(30); press(0,8,1); run(30); press(0,8,0); run(30);
     CHECK("PA3: bounce = one toggle (FILTER->V/DIV, not back)", osc_sidx==2);
-    init(); osc_sidx=2; press(2,1,1); run(20); press(2,1,0); run(20); press(2,1,1); run(20); press(2,1,0); run(20);
+    init(); osc_sidx=2; press(2,1,1); run(30); press(2,1,0); run(30); press(2,1,1); run(30); press(2,1,0); run(30);
     CHECK("PC0: bounce = one toggle (->FILTER)", osc_sidx==0);
     /* (d) + / - never move while frozen; UART u/d still do */
     hold_active = 1; init();
@@ -190,7 +192,7 @@ int main(void){
     press(1,1,0); run(300);
     /* (f) AUTO */
     init(); tap(1,4,100); CHECK("PB2 -> ActAuto once", n_auto==1 && n_fs==0 && n_am==0);
-    run(300); press(1,4,1); run(20); press(1,4,0); run(20); press(1,4,1); run(20); press(1,4,0); run(20);
+    run(300); press(1,4,1); run(30); press(1,4,0); run(30); press(1,4,1); run(30); press(1,4,0); run(30);
     CHECK("PB2 debounced", n_auto==2);
     /* (g) FAST/SLOW */
     init(); tap(1,8,200); CHECK("PB3 short = ActToggleFastSlow", n_fs==1 && n_am==0);
@@ -221,10 +223,14 @@ checks = [
  ('UART dispatch (UartCommand) unchanged vs v62', bt is None or body(src,'UartCommand')==body(bt,'UartCommand')),
 ]
 if bt:
-    for f in ['ActAuto','ActUp','ActDown','ActFreeze','ActToggleFastSlow','ActAutoMode','ActToggleMoveAxis','ActMoveCenter','OscAdjust','OscSetIndex','ButtonRepeat','ButtonJustPressed']:
+    for f in ['ActAuto','ActUp','ActDown','ActFreeze','ActToggleFastSlow','ActAutoMode','ActToggleMoveAxis','ActMoveCenter','OscAdjust','OscSetIndex','ButtonRepeat']:
         checks.append((f+' body unchanged', body(src,f)==body(bt,f)))
+    # v79: ButtonJustPressed now takes the debounced level as an argument instead of reading the pin; everything else is unchanged
+    ws = lambda x: re.sub(r'\s+', '', x)
+    ob = body(bt,'ButtonJustPressed').replace('ButtonJustPressed(Button *btn, uint32_t now)', 'ButtonJustPressed(Button *btn, uint8_t raw, uint32_t now)').replace('uint8_t raw = (HAL_GPIO_ReadPin(btn->port, btn->pin) == GPIO_PIN_RESET) ? 1 : 0;', '')
+    checks.append(('ButtonJustPressed body unchanged except raw is now a parameter (v79)', ws(ob) == ws(body(src,'ButtonJustPressed'))))
     added = [l for l in __import__('difflib').unified_diff(bt.splitlines(), src.splitlines(), lineterm='', n=0) if l.startswith(('+','-')) and not l.startswith(('+++','---'))]
-    checks.append(('diff vs v61 bounded (<=170 changed lines; grew with v72 header format, v73 V/DIV table, v74-v76 filter/grid): %d' % len(added), len(added)<=170))
+    checks.append(('diff vs v61 bounded (<=200 changed lines; grew with v72 header format, v73 V/DIV table, v74-v76 filter/grid, v79 debounce +~12): %d' % len(added), len(added)<=200))
     print('diff changed lines vs v61:', len(added))
 def hb(t): return body(t,'HandleButtons')
 mb = re.search(r"case 'm': \{.*?\n        \}", re.sub(r'/\*.*?\*/','',body(src,'UartCommand'),flags=re.S), re.S)[0] if False else None

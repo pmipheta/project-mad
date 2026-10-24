@@ -27,6 +27,7 @@ def unbtn3b(t):
     b0 = blk.index('static void ButtonSample(uint32_t now)\n{\n    int n;\n') + len('static void ButtonSample(uint32_t now)\n{\n    int n;\n')
     b1 = blk.index('\n}\n\nstatic void BtnDispatchEv')
     body = blk[b0:b1]
+    body = re.sub(r'ButtonJustPressed\((&btn_\w+), ButtonRaw\(\1, now\), now\)', r'ButtonJustPressed(\1, now)', body)   # v79: undo debounced-level argument
     for k, v in _ACT.items():
         body = body.replace(k + ';', v + ';').replace(k + ' ', v + ' ')
     body = body.replace('{ fs_long = 1; BtnEmit(BE_AUTOMODE, 0); }', '{ fs_long = 1; ActAutoMode(); }')

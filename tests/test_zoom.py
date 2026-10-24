@@ -258,9 +258,16 @@ def cut_func(t, name):
 V61_LINE = re.compile(r'btn_|BTN_(?:VDIV|TDIV|FILT|TRIG)|v61|CLK_ENABLE|HAL_GPIO_Init|PB0 = INCREASE|PA3 = V/DIV')
 def strip_v61(t):
     """v61 eight-button panel is covered by test_eightbtn.py; drop its code so the older zoom-era diff budgets still measure what they did."""
-    for name in ['HandleButtons', 'ActIncrease', 'ActDecrease', 'ActSelectSetting', 'ActToggleTrigEdge']:
+    t = re.sub(r'/\* v79: time-based debounce.*?\*/\nstatic uint8_t Debounce\(.*?\n\}\n\n', '', t, flags=re.S)
+    t = re.sub(r'[^\n]*(?:Debounce\(|HAL_GPIO_ReadPin\(BTN_MAN_PORT)[^\n]*\n', '', t)
+    for name in ['HandleButtons', 'ActIncrease', 'ActDecrease', 'ActSelectSetting', 'ActToggleTrigEdge',
+                 'Debounce', 'ButtonJustPressed', 'ButtonRaw']:   # v79 input debounce: Debounce is new, ButtonJustPressed/ButtonRaw changed signature (covered by test_debounce.py / test_eightbtn.py)
         try: t = cut_func(t, name)
         except AttributeError: pass
+    t = re.sub(r'/\* v79: per-input debouncer.*?\} Debouncer;\n\n', '', t, flags=re.S)
+    t = re.sub(r'[^\n]*ButtonJustPressed\(Button \*btn, [^\n]*;\n', '', t)
+    t = re.sub(r'[^\n]*(?:Debouncer|BTN_STABLE_MS)[^\n]*\n', '', t)
+    t = re.sub(r'/\* v79: time-based debounce.*?\*/\n', '', t, flags=re.S)
     return '\n'.join(l for l in t.splitlines() if not V61_LINE.search(l)) + '\n'
 def strip_allowed(t):
     for b, e in [('MOVE_BEGIN =', 'MOVE_END ='), ('MOVE_DATA_BEGIN =', 'MOVE_DATA_END =')]:

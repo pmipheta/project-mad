@@ -45,7 +45,7 @@ bs = fbody('ButtonSample')
 chk('(b) ButtonSample exists', bs is not None)
 bs = bs or ''
 calls = set(re.findall(r'\b([A-Za-z_]\w*)\s*\(', bs)) - {'if', 'ButtonSample', 'for', 'while', 'sizeof'}
-allowed = {'ButtonRepeat', 'ButtonRaw', 'ButtonJustPressed', 'BtnEmit', 'HAL_GPIO_ReadPin'}
+allowed = {'ButtonRepeat', 'ButtonRaw', 'ButtonJustPressed', 'BtnEmit', 'HAL_GPIO_ReadPin', 'Debounce'}   # v79: Debounce added
 chk('(b) sampler calls only %s' % sorted(allowed), bool(calls) and calls <= allowed, str(sorted(calls - allowed)))
 bad = re.findall(r'\b(Act\w*|ILI9341\w*|HAL_SPI\w*|HAL_ADC\w*|Adc\w*|OSC_\w+|Osc\w*|Uart\w*|printf|snprintf|Draw\w*|Hdr\w*|xSemaphore\w*|hold_active|osc_\w+|Mv\w*)\b', bs)
 chk('(b) sampler has no Act*/LCD/SPI/ADC/OSC_LOCK/UART/Draw/osc state references', not bad, str(bad))
@@ -53,8 +53,8 @@ be = fbody('BtnEmit') or ''
 chk('(b) BtnEmit only touches the queue (xQueueSend, drop counter) + the NULL-queue fallback BtnDispatchEv',
     set(re.findall(r'\b([A-Za-z_]\w*)\s*\(', be)) - {'if', 'BtnEmit'} <= {'xQueueSend', 'BtnDispatchEv'} and 'xQueueSend(xBtnQ, &e, 0)' in be and 'dbg_btn_q_drop++' in be)
 # button state is private to the sampler (+ the helper functions + init in main)
-own = {'ButtonSample', 'ButtonRepeat', 'ButtonRaw', 'ButtonJustPressed', 'ButtonLongPress', 'main'}
-toks = r'\b(btn_up|btn_down|btn_hold|btn_set|btn_vdiv|btn_tdiv|btn_filt|btn_trig|cu_prev|cu_long|cu_t0|fs_prev|fs_long|fs_t0|man_prev|man_long|man_t0)\b'
+own = {'ButtonSample', 'ButtonRepeat', 'ButtonRaw', 'ButtonJustPressed', 'ButtonLongPress', 'Debounce', 'main'}
+toks = r'\b(man_db|btn_up|btn_down|btn_hold|btn_set|btn_vdiv|btn_tdiv|btn_filt|btn_trig|cu_prev|cu_long|cu_t0|fs_prev|fs_long|fs_t0|man_prev|man_long|man_t0)\b'
 outside = []
 for m in re.finditer(r'^(?:static\s+)?[A-Za-z_][\w ]*?[\s\*](\w+)\([^;{}]*\)\s*\{', nc, re.M):
     q = m.end() - 1; dd = 1; k = q + 1
@@ -146,7 +146,7 @@ static void init(void){
     btn_filt=(Button){BTN_FILT_PORT,BTN_FILT_PIN,0,0,0,0}; btn_trig=(Button){BTN_TRIG_PORT,BTN_TRIG_PIN,0,0,0,0};
     pins = 0; osc_sidx = 0;
 }
-static uint32_t CAD = 5;
+static uint32_t CAD = 5; static int MODE = 0;   /* v79: MODE 0 = bounce-free script (pulses < BTN_STABLE_MS and random chatter are filtered now: see test_debounce.py) */
 static void hold(uint32_t mask, uint32_t ms){ pins = mask; for (uint32_t i = 0; i < ms; i += CAD){ T += CAD; HandleButtons(T); } }
 static void tap(uint32_t mask, uint32_t press_ms){ hold(mask, press_ms); hold(0, 400); }
 enum { UP=1, DN=2, HLD=4, VD=8, TD=16, FT=32, TR=64, ST=128, MAN=256 };
@@ -156,16 +156,17 @@ static void scenarios(int hold0){
     static const uint32_t all[] = {UP,DN,HLD,VD,TD,FT,TR,ST,MAN};
     printf("== cad %%lu hold0 %%d\n", (unsigned long)CAD, hold0);
     init(); hold_active = hold0; T = 100000;
-    for (int i = 0; i < 9; i++) { tap(all[i], 100); tap(all[i], 30); tap(all[i], 1100); tap(all[i], 1700); }   /* short, bounce-short, ST/MAN long, PC3 long */
+    for (int i = 0; i < 9; i++) { tap(all[i], 100); if (MODE) tap(all[i], 30); tap(all[i], 1100); tap(all[i], 1700); }   /* short, bounce-short (MODE 1 only), ST/MAN long, PC3 long */
     hold(UP, 2300); hold(0, 300); hold(DN, 2300); hold(0, 300);                                              /* hold-repeat + acceleration */
     hold(UP|DN, 700); hold(0, 300);
     hold(FT|TR, 1700); hold(0, 300);                                                                         /* FREEZE then cursor-long in one pass */
     hold(FT, 1700); hold(0, 300); hold(FT, 1700); hold(0, 300);                                              /* cursor long with hold_active as left by the above */
     hold(0x1FF, 3000); hold(0, 500);
-    for (int i = 0; i < 4000; i++) hold(rnd() & 0x1FF, 5 * (1 + (rnd() %% 12)));                            /* chatter */
+    if (MODE) for (int i = 0; i < 4000; i++) hold(rnd() & 0x1FF, 5 * (1 + (rnd() %% 12)));                  /* chatter (MODE 1 only) */
     hold(0, 500);
 }
-int main(void){
+int main(int argc, char **argv){
+    (void)argv; MODE = argc > 1;
     uint32_t cads[] = {5, 33, 80};
     for (int c = 0; c < 3; c++) for (int h = 0; h < 2; h++) { CAD = cads[c]; rng = 12345; scenarios(h); }
     return 0;
@@ -174,17 +175,18 @@ int main(void){
 
 def harness_source(text):
     ncx = re.sub(r'//[^\n]*', '', bh.strip_comments(text))
-    names = ['ButtonJustPressed', 'ButtonRepeat', 'ButtonRaw', 'ButtonLongPress'] + bh.split_names(text) + ['HandleButtons']
+    names = (['Debounce'] if 'Debounce(' in ncx else []) + ['ButtonJustPressed', 'ButtonRepeat', 'ButtonRaw', 'ButtonLongPress'] + bh.split_names(text) + ['HandleButtons']
     defs = '\n'.join(re.search(r'^#define ' + n + r'\b[^\n]*', ncx, re.M)[0] for n in sorted(set(re.findall(r'^#define (BTN_\w+)', ncx, re.M))))
-    btn_t = ncx[ncx.index('typedef struct {\n    GPIO_TypeDef *port;'):ncx.index('} Button;') + len('} Button;')]
+    dm = re.search(r'typedef struct \{[^}]*\} Debouncer;', ncx)
+    btn_t = (dm[0] + '\n' if dm else '') + ncx[ncx.index('typedef struct {\n    GPIO_TypeDef *port;'):ncx.index('} Button;') + len('} Button;')]
     return C_COMMON % dict(defs=defs, button_t=btn_t, prelude=bh.prelude(text), funcs='\n'.join(bh.func_text(ncx, n) for n in names))
 
-def run_variant(text, tag):
+def run_variant(text, tag, mode=0):
     d = pathlib.Path(tempfile.mkdtemp(prefix='osc3b_' + tag))
     (d / 'h.c').write_text(harness_source(text))
     r = subprocess.run(['gcc', '-O1', '-Wall', '-Wno-unused-function', '-Wno-unused-variable', '-o', str(d / 'h'), str(d / 'h.c')], capture_output=True, text=True)
     if r.returncode: print(r.stderr[:2000]); return None
-    return subprocess.run([str(d / 'h')], capture_output=True, text=True).stdout
+    return subprocess.run([str(d / 'h')] + (['x'] if mode else []), capture_output=True, text=True).stdout
 
 if OLD.exists():
     try:
@@ -197,9 +199,23 @@ if OLD.exists():
     if ok:
         ol, nl = old_out.splitlines(), new_out.splitlines()
         kinds = {l.split()[1] for l in ol if l and l[0].isdigit()}
-        chk('(d) reference run is rich (%d events, kinds: %s)' % (len(ol), ','.join(sorted(kinds))), len(ol) > 500 and {'INC', 'DEC', 'AUTO', 'FREEZE', 'STABLE', 'AUTOMODE', 'FASTSLOW', 'C1', 'C2', 'V/DIV', 'T/DIV', 'FILTER', 'TRIG'} <= kinds)
-        first = next((i for i, (x, y) in enumerate(zip(ol, nl)) if x != y), None)
-        chk('(d) new sampler+dispatch gives the SAME Act* call sequence as the old HandleButtons (5/33/80 ms cadence, hold_active 0/1, %d lines)' % len(ol),
-            ol == nl, '' if ol == nl else 'first diff at line %s: old=%r new=%r (len %d vs %d)' % (first, ol[first] if first is not None and first < len(ol) else None, nl[first] if first is not None and first < len(nl) else None, len(ol), len(nl)))
+        chk('(d) reference run is rich (%d events, kinds: %s)' % (len(ol), ','.join(sorted(kinds))), len(ol) > 300 and {'INC', 'DEC', 'AUTO', 'FREEZE', 'STABLE', 'AUTOMODE', 'FASTSLOW', 'C1', 'C2', 'V/DIV', 'T/DIV', 'FILTER', 'TRIG'} <= kinds)
+        # v79: the input debouncer adds up to BTN_STABLE_MS (+ one sampling period) of latency, so for a bounce-free script compare the Act* SEQUENCE (name, arg, selection state)
+        # exactly and each event time with a tolerance of 25 ms + the cadence. Random-chatter equivalence (expectation 'clean count') lives in test_debounce.py.
+        def parse(lines):
+            ev, cad = [], 0
+            for l in lines:
+                if l.startswith('== cad'): cad = int(l.split()[2]); continue
+                t, rest = l.split(' ', 1); ev.append((int(t), rest, cad))
+            return ev
+        po, pn = parse(ol), parse(nl)
+        seq_ok = [(r, c) for _, r, c in po] == [(r, c) for _, r, c in pn]
+        first = next((i for i, (x, y) in enumerate(zip(po, pn)) if x[1:] != y[1:]), None)
+        chk('(d) bounce-free script: new sampler+dispatch gives the SAME Act* call SEQUENCE as the old HandleButtons (5/33/80 ms cadence, hold_active 0/1, %d events)' % len(po),
+            seq_ok, '' if seq_ok else 'first diff at %s: old=%r new=%r (len %d vs %d)' % (first, po[first] if first is not None and first < len(po) else None, pn[first] if first is not None and first < len(pn) else None, len(po), len(pn)))
+        if seq_ok:
+            worst = max(n[0] - o[0] for o, n in zip(po, pn)); best = min(n[0] - o[0] for o, n in zip(po, pn))
+            bad = [(o, n) for o, n in zip(po, pn) if not (0 <= n[0] - o[0] <= 25 + o[2])]
+            chk('(d) every event is delayed by 0..25 ms + cadence (debounce latency; observed %d..%d ms)' % (best, worst), not bad, str(bad[:2]))
 print('rtos_step3b failures=%d' % fails)
 sys.exit(1 if fails else 0)
