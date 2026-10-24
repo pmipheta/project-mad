@@ -36,7 +36,7 @@ def lineno(pos): return src.count('\n', 0, pos)+1
 
 # (f) PRE-SCHEDULER SAFETY: nothing that can block on the mutex may run before vTaskStartScheduler().
 # Strict text-order check on main(): no Take/Give/OSC_* token AND no call (direct or transitive) to any function that locks.
-LOCKTOK_F = re.compile(r'\b(OSC_LOCK|OSC_UNLOCK|OSC_SET|OscMeasGet|xSemaphoreTake|xSemaphoreGive|xQueue\w*|ulTaskNotifyTake)\b')
+LOCKTOK_F = re.compile(r'\b(OSC_LOCK|OSC_UNLOCK|OSC_SET|OscMeasGet|xSemaphoreTake|xSemaphoreGive|xQueue(?!Create)\w*|ulTaskNotifyTake)\b')
 def presched_violations(text):
     st = strip(text); f = functions(st)
     if 'main' not in f or 'vTaskStartScheduler' not in st[f['main'][0]:f['main'][1]]:
@@ -76,7 +76,7 @@ chk('(a) created after all init that must remain single-threaded and immediately
     ix('xSemaphoreCreateMutex') < ix('xTaskCreate(vMainTask') and ix('xSemaphoreCreateMutex') > ix('HdrInvalidate();'))
 chk('(a) created after HAL_Init + SystemClock_Config (heap/clock ready)', ix('SystemClock_Config();') < ix('xSemaphoreCreateMutex'))
 chk('(a) semphr.h included', '#include "semphr.h"' in raw)
-chk('(a) xTaskCreate called exactly once (still one task)', src.count('xTaskCreate(') == 1)
+chk('(a) v77: exactly two tasks (vMainTask once, vInputTask once; step 3b adds the sampler)', src.count('xTaskCreate(') == 2 and src.count('xTaskCreate(vMainTask') == 1 and src.count('xTaskCreate(vInputTask') == 1)
 
 # (b) every write to a protected variable is locked
 slow_a, slow_b = raw.index('SLOW_BEGIN ='), raw.index('SLOW_END =')
@@ -183,7 +183,8 @@ chk('(d) no FromISR variants and no semaphore use outside OSC_* macros', 'FromIS
 sl = lambda t: t[t.index('SLOW_BEGIN ='):t.index('SLOW_END =')]
 if bef is not None: chk('(e) Slow block byte-identical to v65 (%d chars)' % len(sl(bef)), sl(raw) == sl(bef))
 else: print('SKIP (e) Slow block vs v65 (builds/ archive not present in this checkout)')
-chk('(e) vMainTask unchanged in structure: stack 2048 / prio idle+1 task create line identical', 'xTaskCreate(vMainTask, "Main", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);' in raw)
+chk('(e) vMainTask unchanged in structure: stack 2048 / prio idle+1 task create line identical (v77: result now checked)',
+    'xTaskCreate(vMainTask, "Main", 2048, NULL, tskIDLE_PRIORITY + 1, NULL) != pdPASS) Error_Handler();' in raw)
 
 # (f) run
 vv = presched_violations(raw)

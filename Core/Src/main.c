@@ -44,6 +44,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+#include "queue.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1697,6 +1698,8 @@ static int OscCursorX(int idx)
     return (idx * SCREEN_W) / N_SAMPLES;
 }
 
+#include "lcd_fast.h"   /* v78: LcdWriteColumnFast / LcdFastPixel (LCD_FAST_SPI) */
+#define ILI9341_Draw_Pixel LcdFastPixel   /* cursor pixels only: #undef after DrawCursor */
 static uint8_t osc_full_redraw = 1;   /* 1 = the screen was cleared since the last frame: repaint every column */
 static uint8_t cursors_on = 0;      /* 1 = มีเส้น cursor ค้างอยู่บนจอ */
 static int     cur_x1 = -1, cur_x2 = -1;
@@ -1742,6 +1745,7 @@ static void DrawCursor(void)
         ILI9341_Draw_Pixel(cursor_x, (uint16_t)y, DARKCYAN);
 }
 
+#undef ILI9341_Draw_Pixel
 /* --------------------------------------------------------------------------
  * DrawWaveform
  * Erase previous frame (BLACK, preserving grid+cursor), draw new frame (YELLOW).
@@ -1758,6 +1762,7 @@ static uint8_t col_lo_new[SCREEN_W], col_hi_new[SCREEN_W];
 
 static void LcdWriteColumn(uint16_t x, uint16_t y1, uint16_t y2, const uint8_t *bytes, uint32_t n_bytes)
 {
+    if (LCD_FAST_SPI) { LcdWriteColumnFast(x, y1, y2, bytes, n_bytes); return; }   /* v78: register path; the HAL body below = LCD_FAST_SPI 0 */
     ILI9341_Set_Address(x, y1, x, y2);
     HAL_GPIO_WritePin(LCD_DC_PORT, LCD_DC_PIN, GPIO_PIN_SET);
     HAL_GPIO_WritePin(LCD_CS_PORT, LCD_CS_PIN, GPIO_PIN_RESET);
@@ -2093,32 +2098,49 @@ static uint8_t ButtonRaw(const Button *b)
 }
 
 /* --------------------------------------------------------------------------
- * HandleButtons
- * Call this every loop iteration (before frame logic).
+ * v77 (RTOS step 3b): button SAMPLER + DISPATCH.
+ *   ButtonSample(now)  runs in vInputTask every 5 ms: GPIO reads + debounce/repeat/long-press timing ONLY. It never calls Act*, LCD, ADC or UART;
+ *                      each confirmed action is posted as a BtnEv to xBtnQ.
+ *   HandleButtons(now) runs in vMainTask at the old call site: MvSync(), then drains xBtnQ and runs the same Act* per event, in order.
+ *                      State-dependent conditions (hold_active, OscSetName()) are evaluated here, at dispatch time.
+ * Fallback: if the queue is missing events are dispatched directly (old behaviour); if vInputTask was not created HandleButtons samples itself.
  * Roles: HOLD pin = FREEZE | SET pin = AUTO | UP pin = UP/LEFT | DOWN pin = DOWN/RIGHT | PC13 = FAST<>SLOW (short) / AUTO FAST/SLOW (long)
  * -------------------------------------------------------------------------- */
-static void HandleButtons(uint32_t now)
+enum { BE_UP = 1, BE_DOWN, BE_AUTO, BE_VDIV, BE_TDIV, BE_FREEZE, BE_CURSOR_LONG, BE_STABLE, BE_AUTOMODE, BE_FASTSLOW };
+typedef struct { uint8_t id; uint8_t arg; } BtnEv;
+static QueueHandle_t xBtnQ;                  /* created in main() after xOscMutex, before the scheduler starts */
+static uint8_t       btn_task_ok;            /* 1 = vInputTask exists and does the sampling */
+volatile uint32_t    dbg_btn_q_drop;         /* events lost because the queue was full */
+static void BtnDispatchEv(const BtnEv *e);
+
+static void BtnEmit(uint8_t id, uint8_t arg)
+{
+    BtnEv e;
+    e.id = id; e.arg = arg;
+    if (xBtnQ == NULL) { BtnDispatchEv(&e); return; }          /* fallback: no queue -> old direct path (caller is vMainTask) */
+    if (xQueueSend(xBtnQ, &e, 0) != pdPASS) dbg_btn_q_drop++;
+}
+
+static void ButtonSample(uint32_t now)
 {
     int n;
-    MvSync();
 
     /* v61: PB0 = INCREASE, PB1 = DECREASE (hold-repeat as before; OscAdjust only, never move/zoom) */
-    if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) ActIncrease(n);
-    if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) ActDecrease(n);
+    if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) BtnEmit(BE_UP,   (uint8_t)n);
+    if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) BtnEmit(BE_DOWN, (uint8_t)n);
 
     /* PB2 = AUTO (one-shot auto scale) */
-    if (ButtonJustPressed(&btn_hold, now)) ActAuto();
+    if (ButtonJustPressed(&btn_hold, now)) BtnEmit(BE_AUTO, 0);
     (void)ButtonLongPress;
 
     /* v62: PA3 = toggle V/DIV <-> T/DIV select; PC0 = toggle FILTER <-> TRIG select (no-op where the target does not exist, e.g. frozen) */
-    if (ButtonJustPressed(&btn_vdiv, now)) ActSelectSetting(strcmp(OscSetName(), "V/DIV") == 0 ? "T/DIV" : "V/DIV");
-    if (ButtonJustPressed(&btn_tdiv, now)) ActSelectSetting(strcmp(OscSetName(), "FILTER") == 0 ? "TRIG" : "FILTER");
-    (void)ActToggleTrigEdge;
+    if (ButtonJustPressed(&btn_vdiv, now)) BtnEmit(BE_VDIV, 0);
+    if (ButtonJustPressed(&btn_tdiv, now)) BtnEmit(BE_TDIV, 0);
 
     /* v64: PF3 = true FREEZE toggle (ActFreeze, same as UART 'h') */
-    if (ButtonJustPressed(&btn_trig, now)) ActFreeze();
+    if (ButtonJustPressed(&btn_trig, now)) BtnEmit(BE_FREEZE, 0);
 
-    /* v62: PC3 = short (on release) FREEZE | held BTN_CURSOR_LONG_MS (fires once) toggle C1<->C2 cursor (only while frozen). Same pattern as PB3 below. */
+    /* v62: PC3 = short (on release) FREEZE | held BTN_CURSOR_LONG_MS (fires once) toggle C1<->C2 cursor (only while frozen: checked at dispatch). Same pattern as PB3 below. */
     {
         static uint8_t  cu_prev = 0, cu_long = 0;
         static uint32_t cu_t0 = 0;
@@ -2126,9 +2148,9 @@ static void HandleButtons(uint32_t now)
         if (pressed && !cu_prev) { cu_t0 = now; cu_long = 0; }
         if (pressed && !cu_long && (now - cu_t0) >= BTN_CURSOR_LONG_MS) {
             cu_long = 1;
-            if (hold_active) ActSelectSetting(strcmp(OscSetName(), "C1") == 0 ? "C2" : "C1");
+            BtnEmit(BE_CURSOR_LONG, 0);
         }
-        if (!pressed && cu_prev && !cu_long && (now - cu_t0) >= 40u) ActToggleStable();
+        if (!pressed && cu_prev && !cu_long && (now - cu_t0) >= 40u) BtnEmit(BE_STABLE, 0);
         cu_prev = pressed;
     }
 
@@ -2138,8 +2160,8 @@ static void HandleButtons(uint32_t now)
         static uint32_t fs_t0 = 0;
         uint8_t pressed = ButtonRaw(&btn_set);
         if (pressed && !fs_prev) { fs_t0 = now; fs_long = 0; }
-        if (pressed && !fs_long && (now - fs_t0) >= BTN_MAN_LONG_MS) { fs_long = 1; ActAutoMode(); }
-        if (!pressed && fs_prev && !fs_long && (now - fs_t0) >= 40u) ActToggleFastSlow();
+        if (pressed && !fs_long && (now - fs_t0) >= BTN_MAN_LONG_MS) { fs_long = 1; BtnEmit(BE_AUTOMODE, 0); }
+        if (!pressed && fs_prev && !fs_long && (now - fs_t0) >= 40u) BtnEmit(BE_FASTSLOW, 0);
         fs_prev = pressed;
     }
 
@@ -2149,9 +2171,46 @@ static void HandleButtons(uint32_t now)
         static uint32_t man_t0 = 0;
         uint8_t pressed = (HAL_GPIO_ReadPin(BTN_MAN_PORT, BTN_MAN_PIN) == (BTN_MAN_ACTIVE_HIGH ? GPIO_PIN_SET : GPIO_PIN_RESET)) ? 1u : 0u;
         if (pressed && !man_prev) { man_t0 = now; man_long = 0; }
-        if (pressed && !man_long && (now - man_t0) >= BTN_MAN_LONG_MS) { man_long = 1; ActAutoMode(); }
-        if (!pressed && man_prev && !man_long && (now - man_t0) >= 40u) ActToggleFastSlow();
+        if (pressed && !man_long && (now - man_t0) >= BTN_MAN_LONG_MS) { man_long = 1; BtnEmit(BE_AUTOMODE, 0); }
+        if (!pressed && man_prev && !man_long && (now - man_t0) >= 40u) BtnEmit(BE_FASTSLOW, 0);
         man_prev = pressed;
+    }
+}
+
+static void BtnDispatchEv(const BtnEv *e)
+{
+    switch (e->id) {
+    case BE_UP:          ActIncrease(e->arg); break;
+    case BE_DOWN:        ActDecrease(e->arg); break;
+    case BE_AUTO:        ActAuto(); break;
+    case BE_VDIV:        ActSelectSetting(strcmp(OscSetName(), "V/DIV") == 0 ? "T/DIV" : "V/DIV"); break;
+    case BE_TDIV:        ActSelectSetting(strcmp(OscSetName(), "FILTER") == 0 ? "TRIG" : "FILTER"); break;
+    case BE_FREEZE:      ActFreeze(); break;
+    case BE_CURSOR_LONG: if (hold_active) ActSelectSetting(strcmp(OscSetName(), "C1") == 0 ? "C2" : "C1"); break;
+    case BE_STABLE:      ActToggleStable(); break;
+    case BE_AUTOMODE:    ActAutoMode(); break;
+    case BE_FASTSLOW:    ActToggleFastSlow(); break;
+    default: break;
+    }
+}
+
+static void HandleButtons(uint32_t now)
+{
+    BtnEv e;
+    MvSync();
+    (void)ActToggleTrigEdge;
+    if (!btn_task_ok) ButtonSample(now);        /* fallback: vInputTask not running */
+    if (xBtnQ != NULL)
+        while (xQueueReceive(xBtnQ, &e, 0) == pdPASS) BtnDispatchEv(&e);
+}
+
+static void vInputTask(void *arg)
+{
+    TickType_t last = xTaskGetTickCount();
+    (void)arg;
+    for (;;) {
+        ButtonSample(HAL_GetTick());
+        vTaskDelayUntil(&last, pdMS_TO_TICKS(5));
     }
 }
 
@@ -3775,7 +3834,11 @@ int main(void)
     /* USER CODE BEGIN WHILE */
     xOscMutex = xSemaphoreCreateMutex();
     if (xOscMutex == NULL) Error_Handler();
-    xTaskCreate(vMainTask, "Main", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);
+    /* v77 step 3b: queue + sampler task, created here (after xOscMutex, before the scheduler) -- never earlier in main(). Failure -> vMainTask samples buttons itself. */
+    xBtnQ = xQueueCreate(16, sizeof(BtnEv));
+    if (xBtnQ != NULL)
+        btn_task_ok = (xTaskCreate(vInputTask, "Input", 256, NULL, tskIDLE_PRIORITY + 2, NULL) == pdPASS) ? 1u : 0u;
+    if (xTaskCreate(vMainTask, "Main", 2048, NULL, tskIDLE_PRIORITY + 1, NULL) != pdPASS) Error_Handler();
     vTaskStartScheduler();   /* never returns */
     for (;;) { }
     /* USER CODE END WHILE */

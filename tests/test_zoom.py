@@ -276,7 +276,7 @@ if bt is not None:
     contracts.append(('SLOW block (SLOW_BEGIN = .. SLOW_END =) byte-identical to main_before.c', slow_text(src) == slow_text(bt)))
     rest_a, rest_b = strip_allowed(strip_v61(bt)), strip_allowed(strip_v61(src))
     outside = [l for l in __import__('difflib').unified_diff(rest_a.splitlines(), rest_b.splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
-    contracts.append(('non-zoom changes remain bounded (V/DIV range v73 + RTOS v71 + v75 grid #defines): %d changed lines' % len(outside), len(outside) <= 24))
+    contracts.append(('non-zoom changes remain bounded (V/DIV range v73 + RTOS v71 + v75 grid #defines, v78 4-line LCD hook): %d changed lines' % len(outside), len(outside) <= 25))
     for l in outside[:10]: print('   outside:', l)
     for name in ['OscMeasureFrame', 'AdcCaptureFrame', 'OscAutoTimebase', 'OscAutoScale', 'SlowCaptureFrame', 'OscAdjust', 'OscFrameHold', 'DrawWaveform', 'main']:
         def fn(t):

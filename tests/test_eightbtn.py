@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_eightbtn'; OUT.mkdir(parents=True, exist_ok=True)
 from rtos_norm import unrtos
 from _unlock import unlock
+import btn_harness as bh
 src = unrtos(unlock((ROOT/'Core/Src/main.c').read_text()))   # v71: undo the step-3a lock wrappers before the 'unchanged' checks
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 def function(name):
@@ -17,7 +18,9 @@ def function(name):
         d += (nocom[i] == '{') - (nocom[i] == '}'); i += 1
     return nocom[m.start():i]
 names = ['ButtonJustPressed','ButtonRepeat','ButtonRaw','HandleButtons','ActIncrease','ActDecrease','ActUp','ActDown','ActSelectSetting','ActToggleTrigEdge','OscSetIndex','OscSetName','ActToggleStable']
-funcs = '\n'.join(function(n) for n in names)
+raw3 = unlock((ROOT/'Core/Src/main.c').read_text())      # v77: HandleButtons is compiled as the REAL sampler+dispatch (fake queue), not the reconstructed combined text
+nocom3 = bh.strip_comments(raw3)
+funcs = '\n'.join(function(n) for n in names if n != 'HandleButtons') + '\n' + '\n'.join(bh.func_text(nocom3, n) for n in bh.split_names(raw3) + ['HandleButtons'])
 macros = '\n'.join(re.search(r'^#define '+n+r'\s+[^/\n]+', nocom, re.M)[0] for n in
   ['BTN_CURSOR_LONG_MS','BTN_UP_PIN','BTN_DOWN_PIN','BTN_HOLD_PIN','BTN_SET_PIN','BTN_VDIV_PIN','BTN_TDIV_PIN','BTN_FILT_PIN','BTN_TRIG_PIN','BTN_MAN_LONG_MS','BTN_DEBOUNCE_MS','BTN_LONG_MS',
    'BTN_REPEAT_FIRST_MS','BTN_REPEAT_MS','BTN_ACCEL_MS','BTN_ACCEL_STEPS','BTN_REL_MS','BTN_MAN_ACTIVE_HIGH'])
@@ -78,7 +81,7 @@ static void ActAutoMode(void){ n_am++; }
 static void ActIncrease(int n); static void ActDecrease(int n); static void ActSelectSetting(const char *name); static void ActToggleTrigEdge(void);
 static uint8_t ButtonLongPress(Button *b, uint32_t now){ (void)b;(void)now; return 0; }
 static void ActUp(int n); static void ActDown(int n); static void OscSetIndex(int idx); static const char *OscSetName(void); static void ActFreeze(void); static void ActToggleStable(void);
-''' + funcs + r'''
+''' + bh.prelude(raw3) + funcs + r'''
 static int fails = 0;
 #define CHECK(name, cond) do { int ok_ = !!(cond); printf("%s %s\n", ok_?"PASS":"FAIL", name); if(!ok_) fails++; } while(0)
 static void clr(void){ osc_dirty=0; n_adj_p=n_adj_m=n_move=n_auto=n_fs=n_am=n_freeze=0; }

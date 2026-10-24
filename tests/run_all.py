@@ -4,7 +4,7 @@ import pathlib, re, subprocess, sys
 HERE = pathlib.Path(__file__).resolve().parent
 SUITES = ['test_autotb.py', 'test_dma.py', 'test_draw.py', 'test_hold.py', 'test_osc.py', 'test_slow.py',
           'test_buttons.py', 'test_realpic.py', 'test_zoom.py', 'test_blink.py', 'test_eightbtn.py',
-          'test_rtos_step3a.py', 'test_vdiv_range.py', 'test_edge_filter.py']
+          'test_rtos_step3a.py', 'test_rtos_step3b.py', 'test_vdiv_range.py', 'test_edge_filter.py', 'test_fast_lcd.py']
 # test_rtos_step1.py is superseded by test_rtos_step3a.py (step 1 asserted "no mutex yet").
 bad = 0
 for s in SUITES:

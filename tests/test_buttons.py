@@ -47,7 +47,7 @@ contracts = [
  ("UART 'A' = ActAutoMode, 'a' still generator amplitude", "case 'A': ActAutoMode();" in src and "case 'a': gen_amp" in src),
  ('UART x / 0 / h / z / u / d map to Act*', all(t in src for t in ["case 'x': ActToggleMoveAxis();", "case '0': ActMoveCenter();", "ActFreeze(); break;", "case 'z': case 'Z': ActAuto();", "else ActUp(1);", "case 'd': ActDown(1);"])),
  ('x F A 0 act without Enter', 'strchr("sdhg?zxFA0", c)' in src),
- ('buttons call the same Act* (v61: physical +/- = ActIncrease/ActDecrease)', all(t in src for t in ['ActIncrease(n)', 'ActDecrease(n)', 'ActFreeze();', 'ActAuto();', 'ActAutoMode();', 'ActToggleFastSlow();'])),
+ ('buttons call the same Act* (v61: physical +/- = ActIncrease/ActDecrease; v77: sampler posts BE_UP/BE_DOWN(n), dispatch calls Act*(n))', all(t in src for t in ['case BE_UP:          ActIncrease(e->arg);', 'case BE_DOWN:        ActDecrease(e->arg);', 'ActFreeze();', 'ActAuto();', 'ActAutoMode();', 'ActToggleFastSlow();', 'BtnEmit(BE_UP,   (uint8_t)n)', 'BtnEmit(BE_DOWN, (uint8_t)n)'])),
  ('pin defines kept (TODO pins)', all(t in src for t in ['#define BTN_UP_PIN      GPIO_PIN_0', '#define BTN_DOWN_PIN    GPIO_PIN_1', '#define BTN_HOLD_PIN    GPIO_PIN_2', '#define BTN_SET_PIN     GPIO_PIN_3'])),
  ('old SET behaviour kept on UART s', "case 's': OscSetIndex(osc_sidx + 1); break;" in src),
 ]

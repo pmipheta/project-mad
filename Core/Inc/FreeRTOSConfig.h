@@ -11,7 +11,7 @@ extern uint32_t SystemCoreClock;
 #define configUSE_TIME_SLICING                  1
 #define configMAX_PRIORITIES                    5
 #define configMINIMAL_STACK_SIZE                ( ( uint16_t ) 128 )
-#define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 15 * 1024 ) )   /* tunable later; main task stack (2048 words = 8KB) comes from here too -> see note */
+#define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 24 * 1024 ) )   /* v77: main task stack (8KB) + input task (1KB) + queue + mutex + idle */
 #define configMAX_TASK_NAME_LEN                 ( 16 )
 #define configUSE_16_BIT_TICKS                  0
 #define configIDLE_SHOULD_YIELD                 1
