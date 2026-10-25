@@ -62,6 +62,7 @@ harness = r'''
 #include <math.h>
 #define ADC_INPUT_ENABLE 1
 #define N_SAMPLES 240
+#define SCREEN_W 320   /* v85: C1/C2 are LCD x positions */
 #define ADC_VREF 3.3f
 #define ADC_INPUT_GAIN 1.0f   /* v84: harness signals are pin volts */
 #define ADC_FULL 4095
@@ -87,12 +88,13 @@ static const float osc_vdivs[] = {0.0001f,0.0002f,0.0005f,0.001f,0.002f,0.005f,0
 static const char *osc_set_names[] = {"FILTER","TRIG","V/DIV","T/DIV"};
 static const char *osc_hold_names[] = {"C1","C2","V/DIV"};
 static int osc_tdiv_i = 8, osc_vdiv_i = OSC_VDIV_DEF, osc_fwin = 5, osc_trig_fall = 0, osc_sidx = 0, osc_c1 = 40, osc_c2 = 160;
+static uint8_t osc_cur_dirty = 0; static uint32_t btn_rep_ms = BTN_REPEAT_MS;   /* v85 */
 static float volts_per_div = 1.0f;
 static uint8_t hold_active, osc_dirty, osc_stable = 1, osc_auto_stage, osc_auto_tries, osc_frame_valid = 1, new_frame_ready, osc_auto_tb = 1, osc_lock_auto;
 static volatile uint8_t slow_active, slow_fast_flag;
 static uint8_t adc_fast_content; static uint32_t adc_over_t;
 static float osc_raw_vpp, dbg_auto_fsel, osc_v[N_SAMPLES], osc_offset_ct = 2048.0f;
-static int16_t raw_samples[N_SAMPLES]; static int16_t new_y[N_SAMPLES]; static int osc_plot_offset;
+static int16_t raw_samples[N_SAMPLES]; static int16_t new_y[N_SAMPLES]; static int osc_plot_offset; static float osc_fs_eff = 24000.0f;   /* v85 OscCursorDtS */
 static uint16_t osc_env_lo_ct[N_SAMPLES], osc_env_hi_ct[N_SAMPLES]; static uint8_t osc_env_on; static int16_t env_y_lo[N_SAMPLES], env_y_hi[N_SAMPLES]; static uint8_t env_y_on; static float osc_env_mean_ct, osc_env_rms_ct;   /* v83 peak detect */
 static uint16_t adc_raw_buf[ADC_RAW_MAX];
 static volatile uint16_t slow_hist[SLOW_HIST_N]; static volatile uint32_t slow_last_t, slow_valid_cnt, slow_period_us = 2083;
@@ -268,7 +270,19 @@ int main(void){
     memset(&b,0,sizeof b); ButtonRepeat(&b,1,5000); int s=0; for(t=5005;t<5100;t+=5) s+=ButtonRepeat(&b,(t>=5020&&t<5030)?0:1,t); check("contact bounce (10 ms low) while held: no extra step", s==0);
     /* a short tap = exactly one step */
     memset(&b,0,sizeof b); s=ButtonRepeat(&b,1,9000); for(t=9005;t<9150;t+=5) s+=ButtonRepeat(&b,(t<9100)?1:0,t); check("short tap (100 ms) = exactly one step", s==1);
+    /* v85: C1/C2 held = 20 ms repeat (smooth glide); a short tap is still one step */
+    btn_rep_ms = BTN_CUR_REPEAT_MS; memset(&b,0,sizeof b); s=0; uint32_t tl=0, gap_bad=0;
+    for(t=11000;t<=12000;t+=5){ int n=ButtonRepeat(&b,1,t); if(n){ if(tl && t>11000+BTN_REPEAT_FIRST_MS && t-tl!=BTN_CUR_REPEAT_MS) gap_bad++; tl=t; s+=n; } }
+    snprintf(nm,sizeof nm,"v85 cursor hold: repeats every %u ms after the first %u ms (%d steps in 1 s)",(unsigned)BTN_CUR_REPEAT_MS,(unsigned)BTN_REPEAT_FIRST_MS,s); check(nm, gap_bad==0 && s>=30);
+    memset(&b,0,sizeof b); s=ButtonRepeat(&b,1,14000); for(t=14005;t<14150;t+=5) s+=ButtonRepeat(&b,(t<14100)?1:0,t); check("v85 cursor: short tap = exactly one step", s==1);
+    btn_rep_ms = BTN_REPEAT_MS;
   }
+  /* v85: frozen C1/C2 move 1 sample per step and ask only for the cursor repaint, not a full redraw */
+  { hold_active=1; osc_sidx=0; osc_c1=100; osc_dirty=0; osc_cur_dirty=0; OscAdjust(+1);
+    check("v85: C1 +1 LCD pixel, cursor-only repaint", osc_c1==101 && osc_cur_dirty==1 && osc_dirty==0);
+    osc_sidx=1; osc_c2=319; osc_cur_dirty=0; OscAdjust(+1); check("v85: C2 clamps at the last LCD column (319)", osc_c2==319 && osc_cur_dirty==1);
+    osc_sidx=2; osc_cur_dirty=0; OscAdjust(+1); check("v85: V/DIV while frozen still redraws fully", osc_dirty==1 && osc_cur_dirty==0);
+    hold_active=0; osc_sidx=0; osc_dirty=0; }
   printf("buttons failures=%d\n",failures);
   return failures?1:0;
 }
@@ -279,7 +293,7 @@ harness = harness.replace('@@FILL@@', macro('OSC_V_FILL_DIVS'))
 # Button type + ButtonRepeat deps from the real file
 btn_t = src[src.index('typedef struct {\n    GPIO_TypeDef *port;'):src.index('} Button;')+len('} Button;')]
 btn_t = btn_t.replace('GPIO_TypeDef *port;', 'void *port;')
-defs = ''.join('#define %s %s\n' % (m, macro(m)) for m in ['BTN_REPEAT_FIRST_MS', 'BTN_REPEAT_MS', 'BTN_ACCEL_MS', 'BTN_ACCEL_STEPS', 'BTN_REL_MS'])
+defs = ''.join('#define %s %s\n' % (m, macro(m)) for m in ['BTN_REPEAT_FIRST_MS', 'BTN_REPEAT_MS', 'BTN_ACCEL_MS', 'BTN_ACCEL_STEPS', 'BTN_REL_MS', 'BTN_CUR_REPEAT_MS'])
 (OUT/'buttons.c').write_text((OUT/'buttons.c').read_text().replace('#include <math.h>\n', '#include <math.h>\n' + btn_t + '\n' + defs, 1))
 cc = subprocess.run(['clang', '-O0', '-Wno-everything', '-I', str(OUT), str(OUT/'buttons.c'), '-o', str(OUT/'buttons'), '-lm'], capture_output=True, text=True)
 if cc.returncode:
@@ -293,9 +307,10 @@ uart_h = r'''
 #include <string.h>
 #include <math.h>
 #define N_SAMPLES 240
+#define SCREEN_W 320
 static char log_[256]; static int panels;
 #define LOG(s) strcat(log_, s)
-static int gen_wave, osc_calib=1; static float gen_freq=1000, gen_amp=0.5f, gen_dc=1.65f, gen_noise=0.05f, gen_ph; static uint8_t osc_dirty, osc_stable, hold_active; static int osc_sidx, osc_c1, osc_c2;
+static int gen_wave, osc_calib=1; static float gen_freq=1000, gen_amp=0.5f, gen_dc=1.65f, gen_noise=0.05f, gen_ph; static uint8_t osc_dirty, osc_stable, hold_active, osc_cur_dirty; static int osc_sidx, osc_c1, osc_c2;
 static void OscSetIndex(int i){ char b[16]; snprintf(b,16,"S%d,",i); LOG(b); }
 static void ActUp(int n){ (void)n; LOG("UP,"); } static void ActDown(int n){ (void)n; LOG("DOWN,"); } static void ActFreeze(void){ LOG("FREEZE,"); }
 static void ActToggleMoveAxis(void){ LOG("AXIS,"); } static void ActMoveCenter(void){ LOG("ZERO,"); } static void ActToggleFastSlow(void){ LOG("FS,"); } static void ActAutoMode(void){ LOG("AUTOMODE,"); } static void ActAuto(void){ LOG("AUTO,"); } static void ActZoom(int d){ LOG(d>0?"ZIN,":"ZOUT,"); }

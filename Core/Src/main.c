@@ -136,6 +136,7 @@
 #define BTN_ACCEL_MS        1500u    /*      ... and after this long ...                                */
 #define BTN_ACCEL_STEPS     3        /*      ... 3 steps per repeat                                      */
 #define BTN_REL_MS          30u      /* v54: a release must read stable this long (contact bounce)      */
+#define BTN_CUR_REPEAT_MS   20u      /* v85: C1/C2 held (frozen): repeat this often, 1 sample per step  */
 
 /* --- Debug: แสดง FPS จริงบนจอ (1 = เปิด, 0 = ปิด) --- */
 #define SHOW_FPS        1
@@ -291,7 +292,7 @@ static void     DrawFps(float fps);
 
 /* USER CODE BEGIN 0 */
 volatile uint32_t dbg_adc_pre = 0;   /* pre-trigger display points used by the last FAST capture */
-volatile uint32_t prof_us[8];   /* PROFILING (us): 0 capture, 1 process+measure+atb, 2 draw, 3 whole frame, 4 header, 5 loop period */
+volatile uint32_t prof_us[8];   /* PROFILING (us): 0 capture, 1 process+measure+atb, 2 draw, 3 whole frame, 4 header, 5 loop period, 6 C1/C2 move (v85) */
 
 
 
@@ -341,7 +342,8 @@ static int      osc_tdiv_i    = OSC_TDIV_DEF;  /* -> 1.0 ms/div                *
 static int      osc_fwin      = 5;         /* moving average window (1..21 คี่) */
 static int      osc_trig_fall = 0;         /* 0 = rising, 1 = falling          */
 static int      osc_sidx      = 0;         /* setting ที่กำลังปรับ              */
-static int      osc_c1        = 40, osc_c2 = 160;
+static int      osc_c1        = 53, osc_c2 = 213;   /* v85: LCD x of the C1/C2 lines (0..SCREEN_W-1, 1 px per step; were sample indices 40 / 160) */
+static uint8_t  osc_cur_dirty = 0;         /* v85: C1/C2 moved while frozen: repaint only the cursor columns */
 static uint8_t  osc_calib     = 1;         /* AC coupling (calibrate offset)   */
 static uint8_t  osc_dirty     = 1;         /* สั่งวาดใหม่แม้อยู่โหมด HOLD         */
 
@@ -739,6 +741,11 @@ static const char *OscSetName(void)
                        : osc_set_names[osc_sidx % OSC_SET_COUNT];
 }
 
+static int OscCursorSelected(void)   /* v85: frozen and the setting being adjusted is C1 or C2 */
+{
+    return hold_active && (!strcmp(OscSetName(), "C1") || !strcmp(OscSetName(), "C2"));
+}
+
 static int OscClampI(int v, int lo, int hi)
 {
     if (v < lo) return lo;
@@ -798,11 +805,12 @@ static void OscAdjust(int dir)      /* dir = +1 / -1 */
         OSC_SET(osc_auto_tb, 0);            /* manual choice wins until 'z' (AutoScale) re-arms AUTO */
         osc_auto_stage = 0;                 /* a pending one-shot AutoScale would otherwise overwrite this T/DIV (and flip FAST/SLOW) a few frames later */
     } else if (!strcmp(name, "C1")) {
-        osc_c1 = OscClampI(osc_c1 + dir * 5, 0, N_SAMPLES - 1);
+        osc_c1 = OscClampI(osc_c1 + dir, 0, SCREEN_W - 1);   /* v85: 1 LCD pixel (was 5 samples = 6.7 px), holding repeats every 20 ms */
     } else if (!strcmp(name, "C2")) {
-        osc_c2 = OscClampI(osc_c2 + dir * 5, 0, N_SAMPLES - 1);
+        osc_c2 = OscClampI(osc_c2 + dir, 0, SCREEN_W - 1);
     }
-    OSC_SET(osc_dirty, 1);                  /* ให้วาดใหม่แม้อยู่ใน HOLD */
+    if (hold_active && (!strcmp(name, "C1") || !strcmp(name, "C2"))) osc_cur_dirty = 1;   /* v85: only the cursor columns change */
+    else OSC_SET(osc_dirty, 1);             /* ให้วาดใหม่แม้อยู่ใน HOLD */
 }
 
 /* --------------------------------------------------------------------------
@@ -1078,6 +1086,21 @@ static float MvShownV(int idx)               /* the voltage of display point idx
     return (mv_view_on ? mv_view_v : osc_v)[((idx % N_SAMPLES) + N_SAMPLES) % N_SAMPLES];
 }
 
+/* v85: cursor readouts. C1/C2 are LCD x positions; point i is drawn at x = i*SCREEN_W/N_SAMPLES and joined by straight
+ * lines, so the voltage under pixel x is the line between its two neighbouring points. */
+static float OscCursorV(int x)
+{
+    float s = (float)x * (float)N_SAMPLES / (float)SCREEN_W;
+    int   i = (int)s;
+    float f = s - (float)i;
+    if (i >= N_SAMPLES - 1) return MvShownV(N_SAMPLES - 1 + osc_plot_offset);
+    return MvShownV(i + osc_plot_offset) * (1.0f - f) + MvShownV(i + 1 + osc_plot_offset) * f;
+}
+static float OscCursorDtS(void)               /* C2 - C1 in seconds (time zoom included) */
+{
+    return (float)(osc_c2 - osc_c1) * (float)N_SAMPLES / (float)SCREEN_W / osc_fs_eff / (float)mv_zoom_x;
+}
+
 static void MvReset(void)                    /* offsets back to zero: the picture is the captured one again */
 {
     mv_y_steps = 0; mv_x_pts = 0; mv_view_on = 0;
@@ -1194,16 +1217,14 @@ static void ActDown(int n)                   /* DOWN/RIGHT button / 'd' */
  * Move/zoom/freeze stay UART-only (8-button design); UART 'u'/'d' still use ActUp/ActDown which branch on hold_active. */
 static void ActIncrease(int n)
 {
-    (void)n;
     MvSync();
-    OscAdjust(+1);
+    for (int k = OscCursorSelected() ? n : 1; k > 0; k--) OscAdjust(+1);   /* v85: a long hold moves C1/C2 n samples per repeat */
 }
 
 static void ActDecrease(int n)
 {
-    (void)n;
     MvSync();
-    OscAdjust(-1);
+    for (int k = OscCursorSelected() ? n : 1; k > 0; k--) OscAdjust(-1);
 }
 
 /* v61/v62: select a setting by name in the CURRENTLY ACTIVE name array (osc_hold_names while frozen, osc_set_names otherwise).
@@ -1341,10 +1362,9 @@ static void UartPanel(void)
     snprintf(b, sizeof(b), "   Freq: %d Hz", (int)(sm.freq + 0.5f));   /* p44: ปัด */
     UartPrint(b);
     if (hold_active) {
-        UartNum("\r\n U1:", MvShownV(osc_c1 + osc_plot_offset), " V");  UartNum("   U2:", MvShownV(osc_c2 + osc_plot_offset), " V");
-        UartNum("   dV:", MvShownV(osc_c2 + osc_plot_offset) - MvShownV(osc_c1 + osc_plot_offset), " V");
-        snprintf(b, sizeof(b), "   dt: %d us",
-                 (int)(((float)(osc_c2 - osc_c1) / osc_fs_eff) * 1e6f / (float)mv_zoom_x));
+        UartNum("\r\n U1:", OscCursorV(osc_c1), " V");  UartNum("   U2:", OscCursorV(osc_c2), " V");   /* v85: pixel cursors */
+        UartNum("   dV:", OscCursorV(osc_c2) - OscCursorV(osc_c1), " V");
+        snprintf(b, sizeof(b), "   dt: %d us", (int)(OscCursorDtS() * 1e6f));
         UartPrint(b);
     }
     UartNum("\r\n Calib offset:", osc_offset_ct, " cts");
@@ -1415,13 +1435,14 @@ static void UartCommand(char *line)
                 int ci = (tok[1] == '1') ? 1 : 2;
                 OSC_SET(osc_sidx, hold_active ? (ci == 1 ? 0 : 1) : osc_sidx);
                 if (has) {
-                    int v = OscClampI(atoi(arg), 0, N_SAMPLES - 1);
+                    int v = OscClampI(atoi(arg), 0, SCREEN_W - 1);   /* v85: LCD x (pixels) */
                     if (ci == 1) osc_c1 = v; else osc_c2 = v;
                 }
             } else if (tok[1] == 'a') {                                 /* cal 0/1 */
                 osc_calib = (uint8_t)(has ? atoi(arg) : !osc_calib);
             }
-            OSC_SET(osc_dirty, 1);
+            if (hold_active && (tok[1] == '1' || tok[1] == '2')) osc_cur_dirty = 1;   /* v85: cursor columns only */
+            else OSC_SET(osc_dirty, 1);
             break;
         case 'm': {                                                     /* โหมดจอ */
             const char *a = has ? arg : tok + 1;       /* "m a" | "ma" | "m" */
@@ -1752,11 +1773,11 @@ static void DrawLineBresenham(int x0, int y0, int x1, int y1, uint16_t color)
  * ตำแหน่ง x ของ cursor ตาม index ของ sample (ใช้สูตรเดียวกับ MapToScreen)
  * วาดเส้น C1/C2 สีเหลืองเฉพาะตอน HOLD (เหมือน simulator)
  * -------------------------------------------------------------------------- */
-static int OscCursorX(int idx)
+static int OscCursorX(int x)          /* v85: the cursor IS an LCD x position now */
 {
-    if (idx < 0) idx = 0;
-    if (idx >= N_SAMPLES) idx = N_SAMPLES - 1;
-    return (idx * SCREEN_W) / N_SAMPLES;
+    if (x < 0) x = 0;
+    if (x >= SCREEN_W) x = SCREEN_W - 1;
+    return x;
 }
 
 static uint8_t osc_full_redraw = 1;   /* 1 = the screen was cleared since the last frame: repaint every column */
@@ -1898,6 +1919,26 @@ static void DrawWaveform(void)
     memcpy(old_y, new_y, sizeof(new_y));
     osc_full_redraw = 0;
 }
+
+/* v85: repaint one whole column of the waveform area from what DrawWaveform last drew (col_*_old) and the background
+ * (cursors / grid); rows skip_y1..skip_y2 are left untouched (-1 = none). */
+static void RepaintColumn(int x, int skip_y1, int skip_y2)
+{
+    uint8_t buf[2 * (SCREEN_H - WAVEFORM_TOP)];
+    int lo = col_lo_old[x], hi = col_hi_old[x], y = WAVEFORM_TOP;
+    while (y < SCREEN_H) {
+        if (y >= skip_y1 && y <= skip_y2) { y = skip_y2 + 1; continue; }
+        int y_end = (skip_y1 > y) ? skip_y1 - 1 : SCREEN_H - 1;
+        if (y_end > SCREEN_H - 1) y_end = SCREEN_H - 1;
+        uint32_t n = 0;
+        for (int yy = y; yy <= y_end; yy++) {
+            uint16_t c = (yy >= lo && yy <= hi) ? YELLOW : BackgroundColour(x, yy);
+            buf[n++] = (uint8_t)(c >> 8); buf[n++] = (uint8_t)c;
+        }
+        LcdWriteColumn((uint16_t)x, (uint16_t)y, (uint16_t)y_end, buf, n);
+        y = y_end + 1;
+    }
+}
 /* DRAWWF_END */
 
 /* --------------------------------------------------------------------------
@@ -1916,7 +1957,13 @@ static void DrawWaveform(void)
  *   ต้องวาด *หลัง* DrawWaveform เพราะรูปคลื่นลบ/วาดทับบรรทัดล่างได้
  *   ตัวดำบนแถบฟ้า เพื่อให้เด่นบนพื้นกราฟ
  * -------------------------------------------------------------------------- */
-static void DrawSettingBar(void)
+#define BAR_X       2                 /* v85: setting bar text position / glyph cell (5x5 font in a 6x8 cell) */
+#define BAR_Y       (SCREEN_H - 12)
+#define BAR_CHAR_W  6
+#define BAR_CHAR_H  8
+static char    bar_txt[40];               /* v85: the bar text now on the screen */
+static uint8_t bar_ok = 0;
+static void SettingBarDraw(int fast)
 {
     char buf[40];
     const char *name = OscSetName();
@@ -1928,12 +1975,41 @@ static void DrawSettingBar(void)
                                                (double)volts_per_div);
     else if (!strcmp(name, "T/DIV"))  snprintf(buf, sizeof(buf), "SET TDIV=%.1fms  UP/DOWN STEP",
                                                (double)osc_tdivs_ms[osc_tdiv_i]);
-    else if (!strcmp(name, "C1"))     snprintf(buf, sizeof(buf), "SET C1=%d  UP/DOWN +-5", osc_c1);
-    else if (!strcmp(name, "C2"))     snprintf(buf, sizeof(buf), "SET C2=%d  UP/DOWN +-5", osc_c2);
+    else if (!strcmp(name, "C1"))     snprintf(buf, sizeof(buf), "SET C1=%3d  UP/DOWN HOLD", osc_c1);   /* v85: fixed width, 1 sample steps */
+    else if (!strcmp(name, "C2"))     snprintf(buf, sizeof(buf), "SET C2=%3d  UP/DOWN HOLD", osc_c2);
     else                              snprintf(buf, sizeof(buf), "SET --");
 
-    ILI9341_Draw_Text(buf, 2, SCREEN_H - 12, BLACK, 1, CYAN);
+    if (fast && bar_ok && strlen(buf) == strlen(bar_txt)) {        /* v85 cursor move: only the characters that changed */
+        for (int k = 0; buf[k]; k++)
+            if (buf[k] != bar_txt[k]) ILI9341_Draw_Char(buf[k], (uint16_t)(BAR_X + k * BAR_CHAR_W), BAR_Y, BLACK, 1, CYAN);
+    } else {
+        ILI9341_Draw_Text(buf, BAR_X, BAR_Y, BLACK, 1, CYAN);
+    }
+    snprintf(bar_txt, sizeof(bar_txt), "%s", buf); bar_ok = 1;
     snprintf((char *)dbg_lcd_bar, sizeof(dbg_lcd_bar), "%s", buf);
+}
+
+static void DrawSettingBar(void) { SettingBarDraw(0); }
+
+/* v85: C1/C2 moved while frozen. A full redraw repainted all 320 columns (~98 ms per step, the "freeze"); the trace
+ * on the screen is known (col_lo_old / col_hi_old), so only the old and the new cursor columns are repainted, leaving
+ * the setting bar's rows alone (they are drawn over the cursor), then the bar's changed characters. ~1 ms per move. */
+static void CursorsMoveFast(void)
+{
+    int nx1 = OscCursorX(osc_c1), nx2 = OscCursorX(osc_c2);
+    int xs[4] = { cur_x1, cur_x2, nx1, nx2 };
+    int bw = BAR_X + (int)strlen(bar_txt) * BAR_CHAR_W;
+    cur_x1 = nx1; cur_x2 = nx2; cursors_on = 1;
+    for (int k = 0; k < 4; k++) {
+        int x = xs[k], dup = 0;
+        if (x < 0 || x >= SCREEN_W) continue;
+        for (int j = 0; j < k; j++) if (xs[j] == x) dup = 1;
+        if (dup) continue;
+        if (bar_ok && x >= BAR_X && x < bw) RepaintColumn(x, BAR_Y, BAR_Y + BAR_CHAR_H - 1);
+        else                                RepaintColumn(x, -1, -1);
+    }
+    SettingBarDraw(1);
+    osc_cur_dirty = 0;
 }
 
 #if ADC_INPUT_ENABLE
@@ -2013,14 +2089,14 @@ static void DrawTopPanel(void)
     /* Vpp — x=2 */
     if (hold_active) {
         /* ── HOLD: ค่าที่ cursor C1/C2 (เหมือน simulator) ────────────────── */
-        snprintf(buf, sizeof(buf), "U1=%.2fV", (double)MvShownV(osc_c1 + osc_plot_offset));
+        snprintf(buf, sizeof(buf), "U1=%.2fV", (double)OscCursorV(osc_c1));
         HDRT(buf, 2, 10, YELLOW, 1, BLACK);
-        snprintf(buf, sizeof(buf), "U2=%.2fV", (double)MvShownV(osc_c2 + osc_plot_offset));
+        snprintf(buf, sizeof(buf), "U2=%.2fV", (double)OscCursorV(osc_c2));
         HDRT(buf, 72, 10, YELLOW, 1, BLACK);
-        snprintf(buf, sizeof(buf), "dV=%.2fV", (double)(MvShownV(osc_c2 + osc_plot_offset) - MvShownV(osc_c1 + osc_plot_offset)));
+        snprintf(buf, sizeof(buf), "dV=%.2fV", (double)(OscCursorV(osc_c2) - OscCursorV(osc_c1)));
         HDRT(buf, 148, 10, YELLOW, 1, BLACK);
         snprintf(buf, sizeof(buf), "dt=%.2fms",
-                 (double)((float)(osc_c2 - osc_c1) / osc_fs_eff * 1000.0f / (float)mv_zoom_x));   /* v57: cursor distance in time shrinks with the zoom */
+                 (double)(OscCursorDtS() * 1000.0f));   /* v57: cursor distance in time shrinks with the zoom; v85: pixel cursors */
         HDRT(buf, 2, 20, YELLOW, 1, BLACK);
         snprintf(buf, sizeof(buf), "MOVE:%c", mv_axis_x ? 'X' : 'Y');                  /* v54: frozen only */
         HDRT(buf, 72, 20, ORANGE, 1, BLACK);
@@ -2135,6 +2211,7 @@ static uint8_t ButtonLongPress(Button *btn, uint32_t now)
 
 /* v54: UP/DOWN are held, not toggled. Returns the number of steps due now: 1 on the press, then 1 every BTN_REPEAT_MS after BTN_REPEAT_FIRST_MS,
  * BTN_ACCEL_STEPS per repeat once held for BTN_ACCEL_MS. raw = 1 while the pin reads pressed. */
+static uint32_t btn_rep_ms = BTN_REPEAT_MS;   /* v85: repeat period, BTN_CUR_REPEAT_MS while C1/C2 is adjusted */
 static int ButtonRepeat(Button *b, uint8_t raw, uint32_t now)
 {
     if (!raw) {
@@ -2150,7 +2227,7 @@ static int ButtonRepeat(Button *b, uint8_t raw, uint32_t now)
         return 1;
     }
     if ((int32_t)(now - b->next_rep_tick) >= 0) {
-        b->next_rep_tick = now + BTN_REPEAT_MS;
+        b->next_rep_tick = now + btn_rep_ms;
         return ((now - b->held_since_tick) >= BTN_ACCEL_MS) ? BTN_ACCEL_STEPS : 1;
     }
     return 0;
@@ -2172,6 +2249,7 @@ static void HandleButtons(uint32_t now)
     MvSync();
 
     /* v61: PB0 = INCREASE, PB1 = DECREASE (hold-repeat as before; OscAdjust only, never move/zoom) */
+    btn_rep_ms = OscCursorSelected() ? BTN_CUR_REPEAT_MS : BTN_REPEAT_MS;   /* v85: C1/C2 glide; other settings keep 60 ms */
     if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) ActIncrease(n);
     if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) ActDecrease(n);
 
@@ -3740,6 +3818,12 @@ static void vMainTask(void *argument)
         /* --- Button handling (every loop) --------------------------------- */
         HandleButtons(now);
         UartPoll();               /* รับคำสั่งจาก USART3 (แทนปุ่มจริง) */
+        if (osc_cur_dirty) {      /* v85: C1/C2 moved while frozen: repaint the cursor columns now, not on the 33 ms frame */
+            if (hold_active && cursors_on && !osc_dirty) {
+                { uint32_t pq0 = DWT->CYCCNT; CursorsMoveFast(); prof_us[6] = AdcElapsedUs(pq0); }
+                if ((now - last_header_tick) >= 50u && (now - last_header_tick) < HEADER_MS) last_header_tick = now - HEADER_MS;   /* U1/U2/dV/dt follow */
+            } else if (!hold_active) osc_cur_dirty = 0;
+        }
 
 
         /* --- Waveform frame update (~30 FPS) ------------------------------ */
@@ -3851,6 +3935,7 @@ static void vMainTask(void *argument)
                 DrawSettingBar();       /* แถบ "กำลังตั้งค่าอะไร" ทับหลังวาดรูป */
                 prof_us[2] = AdcElapsedUs(pd0);
                 OSC_SET(osc_dirty, 0);
+                osc_cur_dirty = 0;      /* v85: the full redraw drew the cursors too */
 
 #if SHOW_FPS
                 dbg_wf_ms = HAL_GetTick() - t_wf0;

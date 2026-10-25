@@ -40,7 +40,7 @@ o 1.65          DC offset 0.50–2.50 V          o          = +0.05 V
 n 0.05          noise (V, SD) 0–0.30 V         n          = +0.005 V
 v + | v -       เลือก V/DIV (0.1 0.2 0.5 1.0 2.0 V)
 t + | t -       เลือก T/DIV (0.1 0.2 0.5 1.0 2.0 ms)
-c1 40 | c2 160  ตำแหน่ง cursor (จำนวน sample)
+c1 53 | c2 213  ตำแหน่ง cursor (พิกเซล x บนจอ 0…319, v85)
 cal 0 | cal 1   ปิด/เปิด AC coupling (calibrate offset)
 ```
 
@@ -52,7 +52,7 @@ cal 0 | cal 1   ปิด/เปิด AC coupling (calibrate offset)
 | **TRIG** | RISE / FALL | เปลี่ยนเป็นขอบตก (แบบ simulator ซึ่งไม่มี AUTO/NORM/SNGL แล้ว) |
 | **V/DIV** | 0.1–2.0 V | ย่อ/ขยายแนวตั้ง |
 | **T/DIV** | 0.1–2.0 ms | ความกว้างเวลา 1 จอ = T/div × 10 ช่อง ⇒ Fs = 240 / (T/div×10) → 120k…12k Sa/s |
-| **C1/C2** (ตอน HOLD) | 0…239 | เลื่อน cursor ทีละ 5 sample, แถวล่างโชว์ U1·U2·ΔV·Δt |
+| **C1/C2** (ตอน HOLD) | 0…319 | เลื่อน cursor ทีละ 1 พิกเซล (v85; กดค้าง = เลื่อนต่อเนื่องทุก 20 ms, ค้างเกิน 1.5 s = 3 พิกเซล/ครั้ง), แถวล่างโชว์ U1·U2·ΔV·Δt |
 
 Generator ไล่ตามเวลาจริงต่อเนื่อง + roll mode (ข้อมูลใหม่เข้าขวา เส้นไถลซ้าย ~8 sample/เฟรม) เหมือนที่ทำไว้ก่อนหน้า
 
@@ -166,7 +166,7 @@ Generator ไล่ตามเวลาจริงต่อเนื่อง 
 
 ## 10. Indicator บนจอ LCD ว่ากำลังตั้งค่าอะไร
 
-- **แถบบรรทัดล่างสุดของจอ**: `SET FILT=5  UP/DOWN +-2` · `SET TRIG=RISE  UP/DOWN TOGGLE` · `SET VDIV=1.0V  UP/DOWN STEP` · `SET TDIV=1.0ms  UP/DOWN STEP` (HOLD: `SET C1=40 …`) — ตัวดำบนแถบฟ้า วาดใหม่ทุกเฟรม
+- **แถบบรรทัดล่างสุดของจอ**: `SET FILT=5  UP/DOWN +-2` · `SET TRIG=RISE  UP/DOWN TOGGLE` · `SET VDIV=1.0V  UP/DOWN STEP` · `SET TDIV=1.0ms  UP/DOWN STEP` (HOLD: `SET C1= 53  UP/DOWN HOLD`) — ตัวดำบนแถบฟ้า วาดใหม่ทุกเฟรม
 - **มุมขวาบน**: ช่อง setting เป็นตัวดำบนแถบส้ม = "ช่องที่ถูกเลือกอยู่"
 - **ป้าย `V:..` / `T:..`** เปลี่ยนเป็นสี MAGENTA เมื่อเป็นตัวที่ UP/DOWN กำลังแก้
 - ตัวเลข fps (debug) ย้ายไป x=200 ให้พ้นแถบ

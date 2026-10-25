@@ -32,9 +32,11 @@ GRID_DEFS_HERE
 #define DARKCYAN 0x03EF
 #define SHOW_FPS 0
 static int16_t new_y[N_SAMPLES], old_y[N_SAMPLES];
-static uint8_t hold_active = 0; static int osc_c1 = 50, osc_c2 = 150; static uint16_t cursor_x = 160; static uint8_t osc_full_redraw = 1;
-static int OscCursorX(int idx){ if(idx<0)idx=0; if(idx>=N_SAMPLES)idx=N_SAMPLES-1; return (idx*SCREEN_W)/N_SAMPLES; }
+static uint8_t hold_active = 0; static int osc_c1 = 67, osc_c2 = 200; static uint16_t cursor_x = 160; static uint8_t osc_full_redraw = 1;
+static int OscClampI(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); }
+static int OscCursorX(int x){ if(x<0)x=0; if(x>=SCREEN_W)x=SCREEN_W-1; return x; }   /* v85: cursors are LCD x */
 static uint8_t col_lo_old[SCREEN_W], col_hi_old[SCREEN_W], col_lo_new[SCREEN_W], col_hi_new[SCREEN_W];
+static int16_t env_y_lo[N_SAMPLES], env_y_hi[N_SAMPLES]; static uint8_t env_y_on = 0;   /* v83 peak-detect band (off here) */
 static uint16_t fb[SCREEN_W][SCREEN_H]; static long writes;
 static void LcdWriteColumn(uint16_t x, uint16_t y1, uint16_t y2, const uint8_t *bytes, uint32_t n){
   if ((uint32_t)(y2 - y1 + 1) * 2u != n) { printf("BAD LENGTH\n"); exit(2); }
@@ -67,7 +69,7 @@ int main(void){
       if(s==5 && f==10){   /* cursors moved: ClearCursors restores the old columns, sets the flag; DrawCursors paints the new ones after the trace */
         uint8_t h=hold_active; hold_active=0; int ox[2]={OscCursorX(osc_c1),OscCursorX(osc_c2)};
         for(int k=0;k<2;k++) for(int y=WAVEFORM_TOP;y<SCREEN_H;y++) fb[ox[k]][y]=BackgroundColour(ox[k],y);
-        hold_active=h; osc_c1=70; osc_c2=200; osc_full_redraw=1; }
+        hold_active=h; osc_c1=93; osc_c2=267; osc_full_redraw=1; }
       long w0=writes; DrawWaveform(); total+=writes-w0; nfr++;
       if(hold_active){ int cx[2]={OscCursorX(osc_c1),OscCursorX(osc_c2)}; for(int k=0;k<2;k++) for(int y=WAVEFORM_TOP;y<SCREEN_H;y++) fb[cx[k]][y]=YELLOW; }
       ideal(); int bad=diff(); if(bad){ printf("FAIL %s frame %d: %d wrong pixels\n",sc[s].name,f,bad); failures++; break; }
@@ -79,10 +81,23 @@ int main(void){
     for(int x=0;x<SCREEN_W;x++){ int dots=0; for(int y=WAVEFORM_TOP;y<SCREEN_H;y++) if(y%GRID_Y_STEP!=GRID_Y_OFFSET && BackgroundColour(x,y)==DARKGREY) dots++;
       int want = (x%32==0 && x!=(int)cursor_x); if(want){ nlines++; if(dots<40) ok=0; } else if(dots) ok=0; }
     printf("%s vertical grid every 1 T/DIV (32 px): %d dotted lines + centre cursor\n", (ok&&nlines==9)?"PASS":"FAIL", nlines); if(!(ok&&nlines==9)) failures++; }
+  /* v85: frozen C1/C2 glide: repaint only the old + new cursor columns (RepaintColumn), the screen must equal a full redraw at every step */
+  { int bad=0, steps=0; long w0=writes; hold_active=1;
+    for(int v=94; v<=200; v++){ int o1=OscCursorX(osc_c1), o2=OscCursorX(osc_c2); osc_c1=v; if(v%3==0) osc_c2=OscClampI(osc_c2-1,0,SCREEN_W-1);
+      int xs[4]={o1,o2,OscCursorX(osc_c1),OscCursorX(osc_c2)};
+      for(int k=0;k<4;k++){ int dup=0; for(int j=0;j<k;j++) if(xs[j]==xs[k]) dup=1; if(!dup) RepaintColumn(xs[k],-1,-1); }
+      ideal(); int cx[2]={OscCursorX(osc_c1),OscCursorX(osc_c2)}; for(int k=0;k<2;k++) for(int y=WAVEFORM_TOP;y<SCREEN_H;y++) expect[cx[k]][y]=YELLOW;
+      bad+=diff(); steps++; }
+    printf("%s v85 cursor glide: %d one-pixel steps equal a full redraw (%ld px written per step, a full redraw wrote %d)\n", bad?"FAIL":"PASS", steps, (writes-w0)/steps, SCREEN_W*(SCREEN_H-WAVEFORM_TOP)); if(bad) failures++;
+    for(int y=0;y<SCREEN_H;y++) fb[5][y]=0x1234; RepaintColumn(5,228,235); int kept=1; for(int y=228;y<=235;y++) if(fb[5][y]!=0x1234) kept=0;
+    int painted=(fb[5][WAVEFORM_TOP]!=0x1234 && fb[5][227]!=0x1234 && fb[5][236]!=0x1234 && fb[5][SCREEN_H-1]!=0x1234);
+    printf("%s v85 RepaintColumn leaves the setting-bar rows alone and paints the rest\n", (kept&&painted)?"PASS":"FAIL"); if(!(kept&&painted)) failures++;
+    hold_active=0; }
   printf("pixels written per frame (avg): %ld  (old per-pixel method wrote 6000-9000 at 15 cycles and cost ~58 us each)\n", total/nfr);
   printf("draw failures=%d\n", failures); return failures; }
 '''
 (OUT/'t.c').write_text(harness.replace('GRID_DEFS_HERE', grid_defs))
 r = subprocess.run(['gcc','-O1','-Wall','-I',str(OUT),'-o',str(OUT/'t'),str(OUT/'t.c'),'-lm'],capture_output=True,text=True)
 print(r.stderr[-1500:])
+if r.returncode: raise SystemExit(2)   # v85: a failed compile must not rerun the previous binary
 print(subprocess.run([str(OUT/'t')],capture_output=True,text=True).stdout)
