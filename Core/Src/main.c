@@ -86,6 +86,12 @@
 #define BTN_FILT_PIN    GPIO_PIN_3
 #define BTN_TRIG_PORT   GPIOF
 #define BTN_TRIG_PIN    GPIO_PIN_3
+#define ACDC_PORT       GPIOE         /* v89: AC/DC coupling input, read as a level: 0 = DC (switch pulls to GND), 1 = AC (pull-up: open = AC) */
+#define ACDC_PIN        GPIO_PIN_0
+#define ACDC_INT_MAX    200           /* v89: PE0 integrator, sampled every 1 ms: HIGH +2, LOW -1; AC at the top, DC at 0.
+                                      *      An open AC side picks up noise (~25 % LOW reads on the board): it still climbs;
+                                      *      DC (solid GND) falls to 0 in 200 ms. */
+#define ADC_DC_ZERO_CT  0.0f          /* v89: DC mode: 0 V at the input = ADC count 0 (this front end has no 1.65 V bias) */
 
 /* --- Screen geometry ------------------------------------------------------- */
 #define HEADER_H        29           /* top panel height (px)                  */
@@ -344,7 +350,7 @@ static int      osc_trig_fall = 0;         /* 0 = rising, 1 = falling          *
 static int      osc_sidx      = 0;         /* setting ที่กำลังปรับ              */
 static int      osc_c1        = 53, osc_c2 = 213;   /* v85: LCD x of the C1/C2 lines (0..SCREEN_W-1, 1 px per step; were sample indices 40 / 160) */
 static uint8_t  osc_cur_dirty = 0;         /* v85: C1/C2 moved while frozen: repaint only the cursor columns */
-static uint8_t  osc_calib     = 1;         /* AC coupling (calibrate offset)   */
+static uint8_t  osc_calib     = 1;         /* 1 = AC coupling (calibrate offset), 0 = DC; v89: follows PE0 (PE0 0 = DC) */
 static uint8_t  osc_dirty     = 1;         /* สั่งวาดใหม่แม้อยู่โหมด HOLD         */
 
 /* โหมดจอ (ดูโหมดที่ใช้อยู่ได้ที่บรรทัด Trig: ในหน้ารายงาน / บนจอ LCD) */
@@ -511,9 +517,9 @@ static void OscProcessFrame(void)
         osc_offset_ct = s / (float)N_SAMPLES;
 #endif
     } else {
-        osc_offset_ct = (float)ADC_MID;
+        osc_offset_ct = ADC_DC_ZERO_CT;                 /* v89: DC: real 0 V on the centre line (was ADC_MID) */
     }
-    osc_offset_v = (osc_offset_ct - (float)ADC_MID) * k;
+    osc_offset_v = osc_calib ? (osc_offset_ct - (float)ADC_MID) * k : 0.0f;   /* v89: DC removes nothing */
 
     /* Moving average filter (window 1..21, คี่) */
     win  = OscFiltWin();   /* v82: odd, never shrinks the wave by > 2 % */
@@ -590,11 +596,12 @@ static void OscMeasureFrame(void)
      * ใหม่: หลังนับขอบหนึ่ง ต้องรอให้สัญญาณแกว่งพ้นครึ่งตรงข้ามก่อน จึงนับขอบถัดไป */
     {
         float hyst = 0.2f * (vmax - vmin);          /* ±20% ของ Vpp */
+        float vc = osc_calib ? 0.0f : 0.5f * (vmax + vmin);   /* v89: DC trace: count around its middle */
         int   armed = 1;
         if (hyst < 1e-6f) hyst = 1e-6f;
-        prev = osc_v[0];
+        prev = osc_v[0] - vc;
         for (int i = 1; i < N_SAMPLES; i++) {
-            float v = osc_v[i];
+            float v = osc_v[i] - vc;
             int up = (!osc_trig_fall && prev < 0.0f && v >= 0.0f);
             int dn = ( osc_trig_fall && prev >= 0.0f && v < 0.0f);
             if (armed && (up || dn)) {
@@ -614,18 +621,22 @@ static void OscMeasureFrame(void)
          * signals must not shrink the numbers (a 5-point filter alone costs ~6 % at 1 kHz). */
         const float kv = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;   /* v84: input volts, same scale as the trace */
         if (osc_raw_valid && osc_frame_valid) {            /* whole cycles of the raw capture */
-            vmax = (osc_raw_max_ct - osc_raw_mean_ct) * kv;
-            vmin = (osc_raw_min_ct - osc_raw_mean_ct) * kv;
-            s2   = osc_raw_rms_ct * kv;  s2 = s2 * s2 * (float)N_SAMPLES;
+            float ref = osc_calib ? osc_raw_mean_ct : osc_offset_ct;   /* v89: DC = absolute volts */
+            vmax = (osc_raw_max_ct - ref) * kv;
+            vmin = (osc_raw_min_ct - ref) * kv;
+            s2   = osc_raw_rms_ct * kv;  s2 = s2 * s2 + ((osc_raw_mean_ct - ref) * kv) * ((osc_raw_mean_ct - ref) * kv);
+            s2  *= (float)N_SAMPLES;                                     /* DC: rms includes the mean */
         } else if (osc_env_on && !slow_active && osc_frame_valid) {   /* v83: no clean period, peak-detect frame: the band (the drawn points are only the mean) */
             float hi = 0.0f, lo = 1e9f;
             for (int i = 0; i < N_SAMPLES; i++) {
                 if ((float)osc_env_hi_ct[i] > hi) hi = (float)osc_env_hi_ct[i];
                 if ((float)osc_env_lo_ct[i] < lo) lo = (float)osc_env_lo_ct[i];
             }
-            vmax = (hi - osc_env_mean_ct) * kv;
-            vmin = (lo - osc_env_mean_ct) * kv;
-            s2   = osc_env_rms_ct * kv;  s2 = s2 * s2 * (float)N_SAMPLES;
+            float ref = osc_calib ? osc_env_mean_ct : osc_offset_ct;   /* v89 */
+            vmax = (hi - ref) * kv;
+            vmin = (lo - ref) * kv;
+            s2   = osc_env_rms_ct * kv;  s2 = s2 * s2 + ((osc_env_mean_ct - ref) * kv) * ((osc_env_mean_ct - ref) * kv);
+            s2  *= (float)N_SAMPLES;
         } else {                                            /* no clean period: whole unfiltered window */
             vmax = -1e9f; vmin = 1e9f; s2 = 0.0f;
             for (int i = 0; i < N_SAMPLES; i++) {
@@ -2023,7 +2034,7 @@ static uint16_t hdr_fg[HDR_FIELDS], hdr_bg[HDR_FIELDS];
 static uint8_t  hdr_ok[HDR_FIELDS];
 static void HdrInvalidate(void) { memset(hdr_ok, 0, sizeof hdr_ok); }
 #define HDR_CHAR_W 6          /* glyph pitch of the 5x5 font at size 1 */
-static void HdrText(int id, const char *t, uint8_t x, uint8_t y, uint16_t fg, uint16_t size, uint16_t bg)
+static void HdrText(int id, const char *t, uint16_t x, uint16_t y, uint16_t fg, uint16_t size, uint16_t bg)
 {
     if (id < 0 || id >= HDR_FIELDS) { ILI9341_Draw_Text(t, x, y, fg, size, bg); return; }
     int n = (int)strlen(t); if (n > 23) n = 23;
@@ -2085,6 +2096,7 @@ static void DrawTopPanel(void)
     else if (trigger_mode == TRIG_SINGLE && !single_captured) { st_txt = "WAIT"; st_fg = ORANGE; }
     else                                              { st_txt = "RUN ";    st_fg = GREEN; }
     HdrText(31, st_txt, 226, 1, st_fg, 1, BLACK);
+    HDRT(osc_calib ? "AC" : "DC", 262, 1, osc_calib ? CYAN : ORANGE, 1, BLACK);   /* v89: coupling (PE0) */
 
     /* ── Row 2 ──────────────────────────────────────────────────────────── */
 
@@ -2254,6 +2266,25 @@ static void HandleButtons(uint32_t now)
     btn_rep_ms = OscCursorSelected() ? BTN_CUR_REPEAT_MS : BTN_REPEAT_MS;   /* v85: C1/C2 glide; other settings keep 60 ms */
     if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) ActIncrease(n);
     if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) ActDecrease(n);
+
+    /* v89: PE0 level = coupling (0 = DC, 1 = AC). Follows the pin only when it changes, so UART "cal" still works until the next flip. */
+    {
+        static uint8_t  ad_last = 0xFF;
+        static int16_t  ad_acc = ACDC_INT_MAX / 2;
+        static uint32_t ad_ms = 0;
+        if (now != ad_ms) {
+            ad_ms = now;
+            ad_acc += (HAL_GPIO_ReadPin(ACDC_PORT, ACDC_PIN) == GPIO_PIN_SET) ? 2 : -1;
+            if (ad_acc > ACDC_INT_MAX) ad_acc = ACDC_INT_MAX;
+            if (ad_acc < 0) ad_acc = 0;
+            uint8_t lv = (ad_acc == ACDC_INT_MAX) ? 1u : (ad_acc == 0) ? 0u : ad_last;   /* between the ends: keep the mode */
+            if (lv != 0xFF && lv != ad_last) {
+                ad_last = lv;
+                osc_calib = lv;                       /* 1 = AC, 0 = DC */
+                OSC_SET(osc_dirty, 1);
+            }
+        }
+    }
 
     /* PB2 = AUTO (one-shot auto scale) */
     if (ButtonJustPressed(&btn_hold, now)) ActAuto();
@@ -4058,6 +4089,9 @@ int main(void)
         btn_init.Pin = BTN_VDIV_PIN;                  HAL_GPIO_Init(BTN_VDIV_PORT, &btn_init);
         btn_init.Pin = BTN_TDIV_PIN | BTN_FILT_PIN;   HAL_GPIO_Init(GPIOC, &btn_init);
         btn_init.Pin = BTN_TRIG_PIN;                  HAL_GPIO_Init(BTN_TRIG_PORT, &btn_init);
+        /* v89: PE0 = AC/DC level input, pull-up (nothing connected = AC; the DC side of the switch pulls it to GND) */
+        __HAL_RCC_GPIOE_CLK_ENABLE();
+        btn_init.Pin = ACDC_PIN; HAL_GPIO_Init(ACDC_PORT, &btn_init);
     }
 
     /* Button struct init (done here to avoid static-initializer cast issue) */

@@ -39,6 +39,7 @@ static int OscExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v76:
 #define ADC_INPUT_GMAX 3.5f
 #define ADC_FULL 4095
 #define ADC_MID 2048
+#define ADC_DC_ZERO_CT 0.0f   /* v89: DC mode zero */
 #define OSC_H_DIVS 10
 #define CENTER_Y 120
 #define GRID_Y_STEP 40
