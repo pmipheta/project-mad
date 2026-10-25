@@ -2032,7 +2032,7 @@ static void HdrText(int id, const char *t, uint8_t x, uint8_t y, uint16_t fg, ui
     for (int k = 0; k < ((n > m) ? n : m); k++) {
         char ch = (k < n) ? t[k] : ' ';
         if (!force && k < m && ch == hdr_txt[id][k]) continue;         /* this character is already on the screen */
-        ILI9341_Draw_Char(ch, (uint8_t)(x + k * HDR_CHAR_W), y, fg, 1, (k < n) ? bg : BLACK);
+        ILI9341_Draw_Char(ch, (uint16_t)(x + k * HDR_CHAR_W), y, fg, 1, (k < n) ? bg : BLACK);
     }
     memcpy(hdr_txt[id], t, (size_t)n); hdr_txt[id][n] = 0;
     hdr_fg[id] = fg; hdr_bg[id] = bg; hdr_ok[id] = 1;
@@ -2074,16 +2074,17 @@ static void DrawTopPanel(void)
     else          HDRT(buf, 150, 1, ORANGE, 1, BLACK);
     snprintf((char *)dbg_lcd_set, sizeof(dbg_lcd_set), "%s", buf);
 
-    /* Run / Hold status — x=226 */
-    if (!osc_frame_valid) {
-        HDRT("ADC ERR", 226, 1, RED, 1, BLACK);
-    } else if (hold_active) {
-        HDRT("HOLD", 226, 1, RED, 1, BLACK);
-    } else if (trigger_mode == TRIG_SINGLE && !single_captured) {
-        HDRT("WAIT", 226, 1, ORANGE, 1, BLACK);
-    } else {
-        HDRT("RUN ", 226, 1, GREEN, 1, BLACK);
-    }
+    /* Run / Hold status — x=226
+     * v80: the four states share ONE cache id (31) so HdrText's per-char diff
+     * erases the previous state's leftover glyphs when the state changes
+     * (e.g. "ADC ERR" -> "RUN " must blank the trailing 3 cells, otherwise the
+     * old red text lingers behind the green RUN). */
+    const char *st_txt; uint16_t st_fg;
+    if (!osc_frame_valid)                             { st_txt = "ADC ERR"; st_fg = RED; }
+    else if (hold_active)                             { st_txt = "HOLD";    st_fg = RED; }
+    else if (trigger_mode == TRIG_SINGLE && !single_captured) { st_txt = "WAIT"; st_fg = ORANGE; }
+    else                                              { st_txt = "RUN ";    st_fg = GREEN; }
+    HdrText(31, st_txt, 226, 1, st_fg, 1, BLACK);
 
     /* ── Row 2 ──────────────────────────────────────────────────────────── */
 
