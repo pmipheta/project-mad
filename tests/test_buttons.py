@@ -80,6 +80,9 @@ harness = r'''
 #define FAST_O2
 #define SLOW_HIST_N 8192u
 #define OSC_V_FILL_DIVS @@FILL@@
+#define OSC_V_DC_DIVS @@DCDIVS@@
+static uint8_t osc_calib = 1;   /* v90: AUTO V/DIV differs in DC */
+static float osc_dc_shift_v;    /* v91: MapToScreen DC shift */
 #define ADC_RAW_MAX 65520u
 typedef struct {float vmax,vmin,vpp,vrms,dc_offset,freq;} OscMeasure;
 static volatile OscMeasure osc_meas;
@@ -285,11 +288,19 @@ int main(void){
     osc_sidx=1; osc_c2=319; osc_cur_dirty=0; OscAdjust(+1); check("v85: C2 clamps at the last LCD column (319)", osc_c2==319 && osc_cur_dirty==1);
     osc_sidx=2; osc_cur_dirty=0; OscAdjust(+1); check("v85: V/DIV while frozen still redraws fully", osc_dirty==1 && osc_cur_dirty==0);
     hold_active=0; osc_sidx=0; osc_dirty=0; }
+  /* v90: DC coupling: AUTO sizes V/DIV by the peak from 0 V (the trace starts on the centre line) so it fits the ~2.2 divs above it */
+  { double pk[] = {1.88, 0.87, 0.30, 3.0}; int want[] = {12, 11, 10, 13};
+    for (int c = 0; c < 4; c++) { int guard = 0;
+      fresh(); osc_calib = 0; F = 2000; A = pk[c]; lastF = -1; hist_blind = 0; osc_meas.vmax = (float)pk[c]; osc_meas.vmin = 0.0f;
+      ActAuto(); while (osc_auto_stage && guard++ < 400) frame();
+      snprintf(nm, sizeof nm, "v90 DC AUTO: peak %.2f V from 0 V -> %.1f V/div (peak at %.2f div above the centre, room 2.27)", pk[c], osc_vdivs[osc_vdiv_i], pk[c] / osc_vdivs[osc_vdiv_i]);
+      check(nm, osc_vdiv_i == want[c] && pk[c] / osc_vdivs[osc_vdiv_i] <= 2.0 + 1e-6); }
+    osc_calib = 1; osc_meas.vmax = osc_meas.vmin = 0.0f; }
   printf("buttons failures=%d\n",failures);
   return failures?1:0;
 }
 '''
-harness = harness.replace('@@FILL@@', macro('OSC_V_FILL_DIVS'))
+harness = harness.replace('@@FILL@@', macro('OSC_V_FILL_DIVS')).replace('@@DCDIVS@@', macro('OSC_V_DC_DIVS'))
 (OUT/'uart_dummy.c').write_text('')
 (OUT/'buttons.c').write_text(harness)
 # Button type + ButtonRepeat deps from the real file
@@ -312,7 +323,7 @@ uart_h = r'''
 #define SCREEN_W 320
 static char log_[256]; static int panels;
 #define LOG(s) strcat(log_, s)
-static int gen_wave, osc_calib=1; static float gen_freq=1000, gen_amp=0.5f, gen_dc=1.65f, gen_noise=0.05f, gen_ph; static uint8_t osc_dirty, osc_stable, hold_active, osc_cur_dirty; static int osc_sidx, osc_c1, osc_c2;
+static float osc_dc_shift_v; static int gen_wave, osc_calib=1; static float gen_freq=1000, gen_amp=0.5f, gen_dc=1.65f, gen_noise=0.05f, gen_ph; static uint8_t osc_dirty, osc_stable, hold_active, osc_cur_dirty; static int osc_sidx, osc_c1, osc_c2;
 static void OscSetIndex(int i){ char b[16]; snprintf(b,16,"S%d,",i); LOG(b); }
 static void ActUp(int n){ (void)n; LOG("UP,"); } static void ActDown(int n){ (void)n; LOG("DOWN,"); } static void ActFreeze(void){ LOG("FREEZE,"); }
 static void ActToggleMoveAxis(void){ LOG("AXIS,"); } static void ActMoveCenter(void){ LOG("ZERO,"); } static void ActToggleFastSlow(void){ LOG("FS,"); } static void ActAutoMode(void){ LOG("AUTOMODE,"); } static void ActAuto(void){ LOG("AUTO,"); } static void ActZoom(int d){ LOG(d>0?"ZIN,":"ZOUT,"); }

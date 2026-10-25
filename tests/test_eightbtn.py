@@ -2,7 +2,7 @@
 ActSelectSetting/ActToggleTrigEdge/OscSetIndex extracted from Core/Src/main.c; GPIO, OscAdjust, MvMove, ActAuto, ActToggleFastSlow, ActAutoMode are recording stubs.
 Not a board test."""
 from pathlib import Path
-import re, subprocess, tempfile
+import re, subprocess, sys, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_eightbtn'; OUT.mkdir(parents=True, exist_ok=True)
 from rtos_norm import unrtos
@@ -16,11 +16,11 @@ def function(name):
     while d:
         d += (nocom[i] == '{') - (nocom[i] == '}'); i += 1
     return nocom[m.start():i]
-names = ['ButtonJustPressed','ButtonRepeat','ButtonRaw','HandleButtons','ActIncrease','ActDecrease','ActUp','ActDown','ActSelectSetting','ActToggleTrigEdge','OscSetIndex','OscSetName','ActToggleStable']
+names = ['ButtonJustPressed','ButtonRepeat','ButtonRaw','HandleButtons','ActIncrease','ActDecrease','ActUp','ActDown','ActSelectSetting','ActToggleTrigEdge','OscSetIndex','OscSetName','ActToggleStable','OscCursorSelected']
 funcs = '\n'.join(function(n) for n in names)
 macros = '\n'.join(re.search(r'^#define '+n+r'\s+[^/\n]+', nocom, re.M)[0] for n in
-  ['BTN_CURSOR_LONG_MS','BTN_UP_PIN','BTN_DOWN_PIN','BTN_HOLD_PIN','BTN_SET_PIN','BTN_VDIV_PIN','BTN_TDIV_PIN','BTN_FILT_PIN','BTN_TRIG_PIN','BTN_MAN_LONG_MS','BTN_DEBOUNCE_MS','BTN_LONG_MS',
-   'BTN_REPEAT_FIRST_MS','BTN_REPEAT_MS','BTN_ACCEL_MS','BTN_ACCEL_STEPS','BTN_REL_MS','BTN_MAN_ACTIVE_HIGH'])
+  ['BTN_CURSOR_LONG_MS','BTN_ACDC_LONG_MS','BTN_UP_PIN','BTN_DOWN_PIN','BTN_HOLD_PIN','BTN_SET_PIN','BTN_VDIV_PIN','BTN_TDIV_PIN','BTN_FILT_PIN','BTN_TRIG_PIN','BTN_MAN_LONG_MS','BTN_DEBOUNCE_MS','BTN_LONG_MS',
+   'BTN_REPEAT_FIRST_MS','BTN_REPEAT_MS','BTN_CUR_REPEAT_MS','BTN_ACCEL_MS','BTN_ACCEL_STEPS','BTN_REL_MS','BTN_MAN_ACTIVE_HIGH'])
 names_line = re.search(r'static const char\s+\*osc_set_names\[\][^;]*;', nocom)[0] + re.search(r'static const char\s+\*osc_hold_names\[\][^;]*;', nocom)[0]
 c = r'''
 #include <stdio.h>
@@ -68,20 +68,22 @@ static int HAL_GPIO_ReadPin(GPIO_TypeDef *p, uint16_t pin){
     if (p==&PC && pin==BTN_MAN_PIN) return low ? 1 : 0;     /* active high */
     return low ? 0 : 1;                                       /* active low */
 }
-static int n_adj_p, n_adj_m, n_move, n_auto, n_fs, n_am, n_sync;
+static int n_adj_p, n_adj_m, n_move, n_auto, n_fs, n_am, n_sync, n_cpl;
 static void OscAdjust(int d){ if (d>0) n_adj_p++; else n_adj_m++; }
 static void MvMove(int d, int n){ (void)d;(void)n; n_move++; }
 static void MvSync(void){ n_sync++; }
 static void ActAuto(void){ n_auto++; }
 static void ActToggleFastSlow(void){ n_fs++; }
 static void ActAutoMode(void){ n_am++; }
+static void ActToggleCoupling(void){ n_cpl++; }
 static void ActIncrease(int n); static void ActDecrease(int n); static void ActSelectSetting(const char *name); static void ActToggleTrigEdge(void);
 static uint8_t ButtonLongPress(Button *b, uint32_t now){ (void)b;(void)now; return 0; }
 static void ActUp(int n); static void ActDown(int n); static void OscSetIndex(int idx); static const char *OscSetName(void); static void ActFreeze(void); static void ActToggleStable(void);
+static int OscCursorSelected(void); static uint32_t btn_rep_ms = BTN_REPEAT_MS;   /* v85 globals the extracted code uses */
 ''' + funcs + r'''
 static int fails = 0;
 #define CHECK(name, cond) do { int ok_ = !!(cond); printf("%s %s\n", ok_?"PASS":"FAIL", name); if(!ok_) fails++; } while(0)
-static void clr(void){ osc_dirty=0; n_adj_p=n_adj_m=n_move=n_auto=n_fs=n_am=n_freeze=0; }
+static void clr(void){ osc_dirty=0; n_adj_p=n_adj_m=n_move=n_auto=n_fs=n_am=n_freeze=n_cpl=0; }
 static void press(int port, int pin, int on){ if(on) pressed_mask[port] |= pin; else pressed_mask[port] &= ~pin; }
 static uint32_t T = 1000;
 static void init(void){
@@ -176,7 +178,7 @@ int main(void){
     CHECK("frozen: PB1 = OscAdjust(-1)", n_adj_m==1);
     CHECK("frozen: physical +/- never MvMove", n_move==0);
     clr(); ActIncrease(3); ActDecrease(3);
-    CHECK("ActIncrease/ActDecrease frozen: adjust, no move", n_adj_p==1 && n_adj_m==1 && n_move==0);
+    CHECK("ActIncrease/ActDecrease frozen on C1: n adjust steps (v85 cursor glide), no move", osc_sidx==0 && n_adj_p==3 && n_adj_m==3 && n_move==0);
     clr(); ActUp(1); ActDown(1);
     CHECK("UART u/d frozen still MvMove, no adjust", n_move==2 && n_adj_p==0 && n_adj_m==0);
     hold_active = 0; clr(); ActUp(1); ActDown(1);
@@ -186,9 +188,16 @@ int main(void){
     run(200); CHECK("PB0 repeats after 300ms hold", n_adj_p>=3);
     press(1,1,0); run(300);
     /* (f) AUTO */
-    init(); tap(1,4,100); CHECK("PB2 -> ActAuto once", n_auto==1 && n_fs==0 && n_am==0);
-    run(300); press(1,4,1); run(20); press(1,4,0); run(20); press(1,4,1); run(20); press(1,4,0); run(20);
-    CHECK("PB2 debounced", n_auto==2);
+    /* v90: short = ActAuto on release; held BTN_ACDC_LONG_MS = AC/DC toggle once, no AUTO */
+    init(); press(1,4,1); run(100); CHECK("PB2 down 100ms: nothing yet (acts on release)", n_auto==0 && n_cpl==0);
+    press(1,4,0); run(300); CHECK("PB2 short -> ActAuto once", n_auto==1 && n_cpl==0 && n_fs==0 && n_am==0);
+    clr(); tap(1,4,20); CHECK("PB2 <40ms glitch ignored", n_auto==0 && n_cpl==0);
+    clr(); press(1,4,1); run(1400); CHECK("PB2 1400ms: not yet long", n_auto==0 && n_cpl==0);
+    run(200); CHECK("PB2 >=1500ms -> ActToggleCoupling", n_cpl==1 && n_auto==0);
+    run(3000); CHECK("PB2 keeps holding: toggles once only", n_cpl==1);
+    press(1,4,0); run(300); CHECK("PB2 release after long: no AUTO", n_auto==0 && n_cpl==1);
+    clr(); tap(1,4,1600); tap(1,4,1600); CHECK("PB2 two long holds -> two toggles (back to start)", n_cpl==2 && n_auto==0);
+    clr(); tap(1,4,1000); CHECK("PB2 1000ms hold is still a short press", n_auto==1 && n_cpl==0);
     /* (g) FAST/SLOW */
     init(); tap(1,8,200); CHECK("PB3 short = ActToggleFastSlow", n_fs==1 && n_am==0);
     clr(); press(1,8,1); run(900); CHECK("PB3 not yet long at 900ms", n_am==0 && n_fs==0);
@@ -202,7 +211,7 @@ int main(void){
 '''
 (OUT/'t.c').write_text(c)
 r = subprocess.run(['gcc','-O0','-Wall','-o',str(OUT/'t'),str(OUT/'t.c')],capture_output=True,text=True)
-if r.returncode: print(r.stderr[:3000])
+if r.returncode: print(r.stderr[:3000]); print('FAIL harness did not compile'); sys.exit(1)   # v90: never run a stale binary
 rr = subprocess.run([str(OUT/'t')],capture_output=True,text=True); print(rr.stdout)
 cfail = 0
 before = ROOT.parent/'builds/v63/main_before.c'
@@ -236,7 +245,7 @@ checks += [
  ('UartCommand m case unchanged vs v62', mcase == (lambda b: b[b.index("case 'm':"):b.index("case 'z'")])(re.sub(r'/\*.*?\*/','',body(bt,'UartCommand'),flags=re.S)) if bt else True),
  ('PC3 long-press block unchanged', 'if (hold_active) ActSelectSetting(strcmp(OscSetName(), "C1") == 0 ? "C2" : "C1");' in src and 'BTN_CURSOR_LONG_MS' in hb(src)),
 ]
-checks += [('PB2 AUTO -> ActAuto', 'ButtonJustPressed(&btn_hold, now)) ActAuto();' in src),
+checks += [('PB2 short -> ActAuto, long -> ActToggleCoupling', 'ActToggleCoupling(); }' in src and '>= 40u) ActAuto();' in src and 'HAL_GPIO_ReadPin(ACDC_PORT' not in src),
  ('PB0/PB1 -> ActIncrease/ActDecrease', 'ActIncrease(n);' in src and 'ActDecrease(n);' in src),
  ('ActIncrease/Decrease have no hold_active branch', 'hold_active' not in body(src,'ActIncrease')+body(src,'ActDecrease') and 'MvMove' not in body(src,'ActIncrease')+body(src,'ActDecrease')),
  ('pins PA3/PC0/PC3/PF3 defined', all(t in src for t in ['BTN_VDIV_PORT   GPIOA','BTN_VDIV_PIN    GPIO_PIN_3','BTN_TDIV_PIN    GPIO_PIN_0','BTN_FILT_PIN    GPIO_PIN_3','BTN_TRIG_PORT   GPIOF','BTN_TRIG_PIN    GPIO_PIN_3'])),

@@ -86,12 +86,9 @@
 #define BTN_FILT_PIN    GPIO_PIN_3
 #define BTN_TRIG_PORT   GPIOF
 #define BTN_TRIG_PIN    GPIO_PIN_3
-#define ACDC_PORT       GPIOE         /* v89: AC/DC coupling input, read as a level: 0 = DC (switch pulls to GND), 1 = AC (pull-up: open = AC) */
-#define ACDC_PIN        GPIO_PIN_0
-#define ACDC_INT_MAX    200           /* v89: PE0 integrator, sampled every 1 ms: HIGH +2, LOW -1; AC at the top, DC at 0.
-                                      *      An open AC side picks up noise (~25 % LOW reads on the board): it still climbs;
-                                      *      DC (solid GND) falls to 0 in 200 ms. */
-#define ADC_DC_ZERO_CT  0.0f          /* v89: DC mode: 0 V at the input = ADC count 0 (this front end has no 1.65 V bias) */
+#define ADC_DC_ZERO_CT  415.0f        /* v89: DC mode: ADC count of 0 V at the input. v90: 415 = 0.335 V at PA0 measured with no
+                                      *      signal: D1 (1N5819) leaks ~71 uA from 3.3 V through R2. Temporary: drifts with temperature;
+                                      *      set back to 0 after D1/D2 are low-leakage diodes. */
 
 /* --- Screen geometry ------------------------------------------------------- */
 #define HEADER_H        29           /* top panel height (px)                  */
@@ -135,6 +132,7 @@
 #define BTN_MAN_ACTIVE_HIGH 1                 /* Nucleo B1: pressed = 1 */
 #define BTN_MAN_LONG_MS 1000                  /* hold this long = back to AUTO */
 #define BTN_CURSOR_LONG_MS 1500               /* v62: PC3 held this long = toggle C1/C2 cursor */
+#define BTN_ACDC_LONG_MS   1500               /* v90: PB2 (AUTO) held this long = toggle AC <-> DC coupling (replaces the PE0 input) */
 #define BTN_DEBOUNCE_MS 200          /* button debounce window                  */
 #define BTN_LONG_MS     2000         /* (v53 long-press threshold, no longer used: AUTO is a short press) */
 #define BTN_REPEAT_FIRST_MS 300u     /* v54: UP/DOWN held: first step at once, repeat after this ...      */
@@ -211,6 +209,7 @@ static int16_t new_y[N_SAMPLES];
 static uint16_t osc_env_lo_ct[N_SAMPLES], osc_env_hi_ct[N_SAMPLES];
 static uint8_t  osc_env_on = 0;
 static float    osc_env_mean_ct = 0.0f, osc_env_rms_ct = 0.0f;   /* mean / AC rms of the raw samples behind the window (readout fallback) */
+static float    osc_env_dcrms_ct = 0.0f;   /* v90: rms of max(0, count - ADC_DC_ZERO_CT) over the same samples (DC Rs) */
 static int16_t  env_y_lo[N_SAMPLES], env_y_hi[N_SAMPLES];   /* screen y of the max (top) and the min (bottom) */
 static uint8_t  env_y_on = 0;
 
@@ -315,6 +314,7 @@ volatile uint32_t prof_us[8];   /* PROFILING (us): 0 capture, 1 process+measure+
  * ========================================================================== */
 #define OSC_H_DIVS      10          /* จำนวนช่องแนวนอน (เหมือน simulator)      */
 #define SIM_STREAM_MODE  2          /* 2 = function generator (ตาม simulator) | 1 = stream | 0 = sine เดิม */
+#define OSC_V_DC_DIVS   2.0f        /* v90 auto scale, DC: the trace starts at 0 V on the centre line -> its peak may reach this many divisions from it */
 #define OSC_V_FILL_DIVS 4.0f        /* v54 auto scale: Vpp may span at most this many divisions (the visible area is ~5.3 div: 2.2 above, 3 below the centre) */
 #define OSC_FIT_CYCLES  2.5f        /* auto scale: อยากเห็นกี่คาบบนจอ (10 ช่อง) */
 #define OSC_SET_COUNT   4           /* FILTER / TRIG / V/DIV / T/DIV            */
@@ -350,7 +350,7 @@ static int      osc_trig_fall = 0;         /* 0 = rising, 1 = falling          *
 static int      osc_sidx      = 0;         /* setting ที่กำลังปรับ              */
 static int      osc_c1        = 53, osc_c2 = 213;   /* v85: LCD x of the C1/C2 lines (0..SCREEN_W-1, 1 px per step; were sample indices 40 / 160) */
 static uint8_t  osc_cur_dirty = 0;         /* v85: C1/C2 moved while frozen: repaint only the cursor columns */
-static uint8_t  osc_calib     = 1;         /* 1 = AC coupling (calibrate offset), 0 = DC; v89: follows PE0 (PE0 0 = DC) */
+static uint8_t  osc_calib     = 1;         /* 1 = AC coupling (calibrate offset), 0 = DC; v90: toggled by holding AUTO (PB2) or UART "cal" */
 static uint8_t  osc_dirty     = 1;         /* สั่งวาดใหม่แม้อยู่โหมด HOLD         */
 
 /* โหมดจอ (ดูโหมดที่ใช้อยู่ได้ที่บรรทัด Trig: ในหน้ารายงาน / บนจอ LCD) */
@@ -361,6 +361,7 @@ static int      trig_hold     = 0;   /* trigger offset ล่าสุดที�
 static int      dbg_trig_off  = 0;   /* เก็บไว้ตรวจย้อนหลังผ่าน SWD          */
 static float    osc_offset_ct = (float)ADC_MID;
 static float    osc_offset_v  = 0.0f;
+static float    osc_dc_shift_v = 0.0f;     /* v91: DC display shift (V) MapToScreen used last; 0 in AC */
 static float    osc_fs_eff    = 100000.0f; /* sample rate สุทธิของหน้าต่างที่แสดง */
 static char     osc_det[8]    = "---";     /* ชนิดคลื่นที่ตรวจได้               */
 static float    osc_v[N_SAMPLES];          /* ข้อมูลหลัง calibrate + filter    */
@@ -372,6 +373,7 @@ static float    osc_raw_freq = 0.0f, osc_raw_vpp = 0.0f;
 static uint8_t  adc_f_held = 0;         /* 1 = the frequency shown is the 1.5 s HOLD of an earlier reading, not measured in this frame */
 static int      osc_disp_cross = 0;     /* rising zero crossings in the displayed window (0..8) */
 static float    osc_raw_mean_ct = 0.0f, osc_raw_rms_ct = 0.0f, osc_raw_min_ct = 0.0f, osc_raw_max_ct = 0.0f;   /* statistics over whole cycles of the raw capture (ADC counts) */
+static float    osc_raw_dcrms_ct = 0.0f;   /* v90: rms of max(0, count - ADC_DC_ZERO_CT) over the same whole cycles = Rs of the clipped DC trace */
 static uint8_t  osc_raw_valid = 0;     /* 1 = the values above belong to this frame (a clean periodic signal was found) */
 static float    osc_capture_tdiv = 1.0f;
 static uint32_t adc_measure_n = 3200u; /* adaptive, independent of display */
@@ -570,6 +572,8 @@ static void OscProcessFrame(void)
             osc_v[i] = (acc / (float)n - osc_offset_ct) * kg;
         }
     }
+    if (!osc_calib)   /* v90: DC: the front end passes no negative half -> nothing below 0 V (counts under the DC zero are the clamp floor) */
+        for (int i = 0; i < N_SAMPLES; i++) if (osc_v[i] < 0.0f) osc_v[i] = 0.0f;
 }
 
 /* --------------------------------------------------------------------------
@@ -625,7 +629,8 @@ static void OscMeasureFrame(void)
             vmax = (osc_raw_max_ct - ref) * kv;
             vmin = (osc_raw_min_ct - ref) * kv;
             s2   = osc_raw_rms_ct * kv;  s2 = s2 * s2 + ((osc_raw_mean_ct - ref) * kv) * ((osc_raw_mean_ct - ref) * kv);
-            s2  *= (float)N_SAMPLES;                                     /* DC: rms includes the mean */
+            if (!osc_calib) { s2 = osc_raw_dcrms_ct * kv; s2 = s2 * s2; }   /* v90: DC: rms of the clipped (>= 0 V) signal, includes the mean */
+            s2  *= (float)N_SAMPLES;
         } else if (osc_env_on && !slow_active && osc_frame_valid) {   /* v83: no clean period, peak-detect frame: the band (the drawn points are only the mean) */
             float hi = 0.0f, lo = 1e9f;
             for (int i = 0; i < N_SAMPLES; i++) {
@@ -636,16 +641,19 @@ static void OscMeasureFrame(void)
             vmax = (hi - ref) * kv;
             vmin = (lo - ref) * kv;
             s2   = osc_env_rms_ct * kv;  s2 = s2 * s2 + ((osc_env_mean_ct - ref) * kv) * ((osc_env_mean_ct - ref) * kv);
+            if (!osc_calib) { s2 = osc_env_dcrms_ct * kv; s2 = s2 * s2; }   /* v90: DC */
             s2  *= (float)N_SAMPLES;
         } else {                                            /* no clean period: whole unfiltered window */
             vmax = -1e9f; vmin = 1e9f; s2 = 0.0f;
             for (int i = 0; i < N_SAMPLES; i++) {
                 float v = ((float)raw_samples[i] - osc_offset_ct) * kv;
+                if (!osc_calib && v < 0.0f) v = 0.0f;   /* v90: DC clipped at 0 V (Mn and Rs) */
                 if (v > vmax) vmax = v;
                 if (v < vmin) vmin = v;
                 s2 += v * v;
             }
         }
+        if (!osc_calib) { if (vmin < 0.0f) vmin = 0.0f; if (vmax < 0.0f) vmax = 0.0f; }   /* v90: DC: Mn/Mx never below 0 V, like the trace */
         peak = (fabsf(vmax) > fabsf(vmin)) ? fabsf(vmax) : fabsf(vmin);
     }
 #endif
@@ -1213,6 +1221,12 @@ static void ActAuto(void)                    /* AUTO button / 'z': unfreeze, off
     AutoScale();                             /* = OscAutoScale() */
 }
 
+static void ActToggleCoupling(void)          /* v90: AUTO (PB2) held BTN_ACDC_LONG_MS / UART "cal": AC <-> DC */
+{
+    osc_calib = !osc_calib;
+    OSC_SET(osc_dirty, 1);
+}
+
 static void ActUp(int n)                     /* UP/LEFT button / 'u' (n = steps, >1 only for a long hold) */
 {
     MvSync();
@@ -1314,6 +1328,10 @@ static void OscAutoScaleStep(void)
     if (!osc_auto_stage || hold_active || !osc_frame_valid || !new_frame_ready) return;
     float f = osc_meas.freq;
     float vpp = ADC_INPUT_ENABLE ? osc_raw_vpp * ADC_INPUT_GAIN : osc_meas.vpp;   /* v84: input volts, like the trace */
+    if (!osc_calib) {   /* v90: DC: size V/DIV by the larger absolute peak (from 0 V), as the span OscAutoApply fills in OSC_V_FILL_DIVS */
+        float pk = fmaxf(fabsf(osc_meas.vmax), fabsf(osc_meas.vmin));
+        vpp = pk * (OSC_V_FILL_DIVS / OSC_V_DC_DIVS);
+    }
     if (f > 0.0f) {
         dbg_auto_fsel = f;
         OscAutoApply(vpp, OscAutoPickTdiv(f));
@@ -1689,12 +1707,32 @@ static void MapToScreen(int trig_offset)
 {
     osc_plot_offset = trig_offset;
     const float *vs = mv_view_on ? mv_view_v : osc_v;       /* v54: panned view while frozen */
+    /* v91: DC: draw the trace shifted down so its middle ((max+min)/2 of the drawn points) sits exactly on CENTER_Y.
+     *      Display only: osc_v, Mx/Mn/Vp/Rs keep the real DC volts. AC: no shift. */
+    float dc_sh = 0.0f;
+    if (!osc_calib) {
+        float lo = vs[0], hi = vs[0];
+        for (int i = 1; i < N_SAMPLES; i++) { if (vs[i] < lo) lo = vs[i]; if (vs[i] > hi) hi = vs[i]; }
+        if (osc_env_on && !mv_view_on) {   /* v91: with the peak band drawn, centre what is seen: at slow T/DIV (2..6 ms) the trace is
+                                            *      the whole-period mean (flat) and the band is the real 0..peak wave */
+            const float kc = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;
+            for (int i = 0; i < N_SAMPLES; i++) {
+                float bl = ((float)osc_env_lo_ct[i] - osc_offset_ct) * kc, bh = ((float)osc_env_hi_ct[i] - osc_offset_ct) * kc;
+                if (bl < 0.0f) bl = 0.0f;
+                if (bh < 0.0f) bh = 0.0f;      /* clipped at 0 V like the drawn band */
+                if (bl < lo) lo = bl;
+                if (bh > hi) hi = bh;
+            }
+        }
+        dc_sh = 0.5f * (lo + hi);
+    }
+    osc_dc_shift_v = dc_sh;
     for (int i = 0; i < N_SAMPLES; i++) {
         int src = (trig_offset + i);
         if (src >= N_SAMPLES) src -= N_SAMPLES;  /* wrap around buffer */
 
         /* Convert count -> voltage -> pixel offset */
-        float v = vs[src];
+        float v = vs[src] - dc_sh;
         int y = CENTER_Y - (int)(v / volts_per_div * (float)(GRID_Y_STEP * mv_zoom_y)) - mv_y_steps * GRID_Y_STEP / 10;   /* v54: Y move (0 = v53) */
 
         /* Clamp to waveform area only (do not draw over header) */
@@ -1711,6 +1749,8 @@ static void MapToScreen(int trig_offset)
             if (src >= N_SAMPLES) src -= N_SAMPLES;
             for (int e = 0; e < 2; e++) {
                 float v = ((float)(e ? osc_env_lo_ct[src] : osc_env_hi_ct[src]) - osc_offset_ct) * kc;
+                if (!osc_calib && v < 0.0f) v = 0.0f;   /* v90: DC band clipped at 0 V like the trace */
+                v -= dc_sh;                              /* v91: same shift as the trace */
                 int y = CENTER_Y - (int)(v / volts_per_div * (float)(GRID_Y_STEP * mv_zoom_y)) - mv_y_steps * GRID_Y_STEP / 10;
                 if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
                 if (y >= SCREEN_H)    y = SCREEN_H - 1;
@@ -2096,7 +2136,7 @@ static void DrawTopPanel(void)
     else if (trigger_mode == TRIG_SINGLE && !single_captured) { st_txt = "WAIT"; st_fg = ORANGE; }
     else                                              { st_txt = "RUN ";    st_fg = GREEN; }
     HdrText(31, st_txt, 226, 1, st_fg, 1, BLACK);
-    HDRT(osc_calib ? "AC" : "DC", 262, 1, osc_calib ? CYAN : ORANGE, 1, BLACK);   /* v89: coupling (PE0) */
+    HDRT(osc_calib ? "AC" : "DC", 296, 1, osc_calib ? CYAN : ORANGE, 1, BLACK);   /* v89: coupling; v90: AUTO hold toggles it, x 296, clear of "ADC ERR" (226..268) */
 
     /* ── Row 2 ──────────────────────────────────────────────────────────── */
 
@@ -2267,27 +2307,14 @@ static void HandleButtons(uint32_t now)
     if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) ActIncrease(n);
     if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) ActDecrease(n);
 
-    /* v89: PE0 level = coupling (0 = DC, 1 = AC). Follows the pin only when it changes, so UART "cal" still works until the next flip. */
-    {
-        static uint8_t  ad_last = 0xFF;
-        static int16_t  ad_acc = ACDC_INT_MAX / 2;
-        static uint32_t ad_ms = 0;
-        if (now != ad_ms) {
-            ad_ms = now;
-            ad_acc += (HAL_GPIO_ReadPin(ACDC_PORT, ACDC_PIN) == GPIO_PIN_SET) ? 2 : -1;
-            if (ad_acc > ACDC_INT_MAX) ad_acc = ACDC_INT_MAX;
-            if (ad_acc < 0) ad_acc = 0;
-            uint8_t lv = (ad_acc == ACDC_INT_MAX) ? 1u : (ad_acc == 0) ? 0u : ad_last;   /* between the ends: keep the mode */
-            if (lv != 0xFF && lv != ad_last) {
-                ad_last = lv;
-                osc_calib = lv;                       /* 1 = AC, 0 = DC */
-                OSC_SET(osc_dirty, 1);
-            }
-        }
-    }
-
-    /* PB2 = AUTO (one-shot auto scale) */
-    if (ButtonJustPressed(&btn_hold, now)) ActAuto();
+    /* PB2 = short (on release) AUTO one-shot scale | v90: held BTN_ACDC_LONG_MS (fires once) toggle AC <-> DC coupling.
+     * Replaces the v89 PE0 switch input: PE0 sat on the analog node through SW1 and could not be read reliably. Same pattern as PB3. */
+    { static uint8_t au_prev = 0, au_long = 0; static uint32_t au_t0 = 0;
+      uint8_t pressed = ButtonRaw(&btn_hold);
+      if (pressed && !au_prev) { au_t0 = now; au_long = 0; }
+      if (pressed && !au_long && (now - au_t0) >= BTN_ACDC_LONG_MS) { au_long = 1; ActToggleCoupling(); }
+      if (!pressed && au_prev && !au_long && (now - au_t0) >= 40u) ActAuto();
+      au_prev = pressed; }
     (void)ButtonLongPress;
 
     /* v62: PA3 = toggle V/DIV <-> T/DIV select; PC0 = toggle FILTER <-> TRIG select (no-op where the target does not exist, e.g. frozen) */
@@ -2726,8 +2753,10 @@ static float FAST_O2 AdcRawFrequency(const uint16_t *buf, uint32_t n, float fs)
                 float cnt = (float)(i1 - i0 + 1u), mean, sq = 0.0f;
                 for (uint32_t i = i0; i <= i1; i++) sm += buf[i];
                 mean = (float)sm / cnt;
-                for (uint32_t i = i0; i <= i1; i++) { float d = (float)buf[i] - mean; sq += d * d; }
-                osc_raw_mean_ct = mean; osc_raw_rms_ct = sqrtf(sq / cnt);
+                float sqd = 0.0f;
+                for (uint32_t i = i0; i <= i1; i++) { float d = (float)buf[i] - mean; sq += d * d;
+                    float z = (float)buf[i] - ADC_DC_ZERO_CT; if (z > 0.0f) sqd += z * z; }   /* v90: DC Rs, clipped at 0 V like the trace */
+                osc_raw_mean_ct = mean; osc_raw_rms_ct = sqrtf(sq / cnt); osc_raw_dcrms_ct = sqrtf(sqd / cnt);
                 osc_raw_min_ct = (float)mn; osc_raw_max_ct = (float)mx; osc_raw_valid = 1;
                 {   /* v82: Mx / Mn of the raw min/max include the noise peaks: 2.47 V read for a 2.40 V sine, whose trace spans 2.4 div at 1 V/div,
                      * so the number did not match the grid. Take them from a boxcar of k = 1/32 period (3..64 samples, keeps > 99.8 % of a sine peak,
@@ -3107,8 +3136,10 @@ static void FAST_O2 AdcCaptureFrame(void)
                     if (q1 <= q0) q1 = q0 + 1u;
                     for (uint32_t q = q0; q < q1; q++) sm += (float)adc_raw_buf[q];
                     mu = sm / (float)(q1 - q0);
-                    for (uint32_t q = q0; q < q1; q++) { float dq = (float)adc_raw_buf[q] - mu; sq += dq * dq; }
-                    osc_env_mean_ct = mu; osc_env_rms_ct = sqrtf(sq / (float)(q1 - q0));
+                    float sqd = 0.0f;
+                    for (uint32_t q = q0; q < q1; q++) { float dq = (float)adc_raw_buf[q] - mu; sq += dq * dq;
+                        float z = (float)adc_raw_buf[q] - ADC_DC_ZERO_CT; if (z > 0.0f) sqd += z * z; }   /* v90: DC Rs */
+                    osc_env_mean_ct = mu; osc_env_rms_ct = sqrtf(sq / (float)(q1 - q0)); osc_env_dcrms_ct = sqrtf(sqd / (float)(q1 - q0));
                 }
                 for (int i = 0; i < N_SAMPLES; i++) {
                     int32_t c = (int32_t)start + (int32_t)((float)i * step + 0.5f);
@@ -3508,8 +3539,10 @@ static float SlowFreqFromPts(const uint16_t *p, float fs, float *vpp_out, int st
             float cnt = (float)(i1 - i0 + 1u), mean, sq = 0.0f;
             for (uint32_t i = i0; i <= i1; i++) sm += p[i];
             mean = (float)sm / cnt;
-            for (uint32_t i = i0; i <= i1; i++) { float d = (float)p[i] - mean; sq += d * d; }
-            osc_raw_mean_ct = mean; osc_raw_rms_ct = sqrtf(sq / cnt);
+            float sqd = 0.0f;
+            for (uint32_t i = i0; i <= i1; i++) { float d = (float)p[i] - mean; sq += d * d;
+                float z = (float)p[i] - ADC_DC_ZERO_CT; if (z > 0.0f) sqd += z * z; }   /* v90: DC Rs */
+            osc_raw_mean_ct = mean; osc_raw_rms_ct = sqrtf(sq / cnt); osc_raw_dcrms_ct = sqrtf(sqd / cnt);
             osc_raw_min_ct = (float)mn; osc_raw_max_ct = (float)mx; osc_raw_valid = 1;
         }
     }
@@ -3809,6 +3842,7 @@ static void MvBuildZoom(void)
         float acc = 0.0f;
         for (int j = -half; j <= half; j++) acc += cnt[OscClampI(i + j, 0, N_SAMPLES - 1)];
         mv_view_v[i] = (acc / (float)zw - osc_offset_ct) * kv;
+        if (!osc_calib && mv_view_v[i] < 0.0f) mv_view_v[i] = 0.0f;   /* v90: DC */
     }
     mv_view_on = 1;
 }
@@ -3831,6 +3865,7 @@ static void MvBuildView(void)                /* mv_view_v[] = the frozen capture
         float acc = 0.0f;
         for (int j = -half; j <= half; j++) acc += cnt[OscClampI(i + j, 0, N_SAMPLES - 1)];
         mv_view_v[i] = (acc / (float)win - osc_offset_ct) * kv;
+        if (!osc_calib && mv_view_v[i] < 0.0f) mv_view_v[i] = 0.0f;   /* v90: DC */
     }
     mv_view_on = (mv_x_pts != 0);
 }
@@ -4089,9 +4124,6 @@ int main(void)
         btn_init.Pin = BTN_VDIV_PIN;                  HAL_GPIO_Init(BTN_VDIV_PORT, &btn_init);
         btn_init.Pin = BTN_TDIV_PIN | BTN_FILT_PIN;   HAL_GPIO_Init(GPIOC, &btn_init);
         btn_init.Pin = BTN_TRIG_PIN;                  HAL_GPIO_Init(BTN_TRIG_PORT, &btn_init);
-        /* v89: PE0 = AC/DC level input, pull-up (nothing connected = AC; the DC side of the switch pulls it to GND) */
-        __HAL_RCC_GPIOE_CLK_ENABLE();
-        btn_init.Pin = ACDC_PIN; HAL_GPIO_Init(ACDC_PORT, &btn_init);
     }
 
     /* Button struct init (done here to avoid static-initializer cast issue) */

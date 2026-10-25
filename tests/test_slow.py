@@ -36,7 +36,8 @@ static int osc_tdiv_i = 8; static int osc_trig_fall = 0; static uint8_t osc_stab
 static uint16_t osc_env_lo_ct[N_SAMPLES], osc_env_hi_ct[N_SAMPLES]; static uint8_t osc_env_on, slow_trig_on;   /* v86 SLOW peak detect / header */
 static volatile int16_t raw_samples[N_SAMPLES];
 static float osc_fs_eff, osc_raw_freq, osc_raw_vpp, osc_capture_tdiv;
-static float osc_raw_mean_ct, osc_raw_rms_ct, osc_raw_min_ct, osc_raw_max_ct; static uint8_t osc_raw_valid;
+static float osc_raw_mean_ct, osc_raw_rms_ct, osc_raw_min_ct, osc_raw_max_ct, osc_raw_dcrms_ct; static uint8_t osc_raw_valid;
+#define ADC_DC_ZERO_CT 415.0f   /* v90: as main.c */
 static volatile uint16_t dbg_adc_min, dbg_adc_max; static volatile uint32_t dbg_adc_frames; static volatile uint8_t dbg_adc_ok;
 static volatile uint8_t new_frame_ready, osc_dirty, osc_frame_valid, slow_active, slow_fast_flag, slow_busy;
 static double now_s, F_HZ=1.0, AMP=0.3, DC=1.65, NOISE=0.0, F2_HZ=0.0, AMP2=0.0;
@@ -93,7 +94,10 @@ int main(void){
   F_HZ=1.1; AMP=0.3; DC=1.65; osc_tdiv_i=T500; run(7.0);
   { float k=3.3f/4095.0f; float dc=osc_raw_mean_ct*k, rms=osc_raw_rms_ct*k, mx=(osc_raw_max_ct-osc_raw_mean_ct)*k, mn=(osc_raw_min_ct-osc_raw_mean_ct)*k;
     int ok = osc_raw_valid && fabsf(dc-1.65f)<0.01f && fabsf(rms-0.3f*0.7071f)<0.006f && fabsf(mx-0.3f)<0.01f && fabsf(mn+0.3f)<0.01f;
-    printf("%s SLOW stats 1.1 Hz (5.5 cycles): DC=%.3f rms=%.3f Mx=%.3f Mn=%.3f (true 1.650 0.212 +-0.300)\n", ok?"PASS":"FAIL", dc, rms, mx, mn); if(!ok)failures++; }
+    printf("%s SLOW stats 1.1 Hz (5.5 cycles): DC=%.3f rms=%.3f Mx=%.3f Mn=%.3f (true 1.650 0.212 +-0.300)\n", ok?"PASS":"FAIL", dc, rms, mx, mn); if(!ok)failures++;
+    /* v90: DC Rs = rms of max(0, signal - DC zero): all above the zero -> sqrt(dc^2 + ac^2) */
+    float z = ADC_DC_ZERO_CT*k, want = sqrtf((1.65f-z)*(1.65f-z) + 0.3f*0.3f*0.5f), got = osc_raw_dcrms_ct*k;
+    ok = fabsf(got-want) < 0.006f; printf("%s v90 DC rms, sine fully above the zero: %.3f V (true %.3f)\n", ok?"PASS":"FAIL", got, want); if(!ok)failures++; }
   F_HZ=1.0;
   /* --- noisy generator rail: 170 mV of noise inside every burst must NOT make a slow signal look fast --- */
   F_HZ=1.0; AMP=0.3; NOISE=0.17; osc_tdiv_i=T500; run(7.0);
@@ -200,6 +204,10 @@ int main(void){
   F_HZ=1.0; slow_busy=1; for(int i=0;i<9000;i++){ now_s+=0.001; OscSlowTick(); } slow_busy=0; osc_tdiv_i=T500; run(6.0);
   { int ok = osc_frame_valid && fabs(osc_raw_freq-1.0)<0.03; printf("%s after a 9 s busy gap: %.3f Hz\n", ok?"PASS":"FAIL", osc_raw_freq); if(!ok)failures++; }
 
+  F_HZ=1.1; AMP=0.3; NOISE=0; osc_tdiv_i=T500; DC=415.0f*3.3f/4095.0f; run(7.0);   /* v90: sine centred on the DC zero: the clipped trace is a half wave -> rms = A/2 */
+  { float k=3.3f/4095.0f, got=osc_raw_dcrms_ct*k; int ok = osc_raw_valid && fabsf(got-0.15f) < 0.006f;
+    printf("%s v90 DC rms, sine centred on the zero (half clipped): %.3f V (true A/2 = 0.150)\n", ok?"PASS":"FAIL", got); if(!ok)failures++; }
+  DC=1.65;
   printf("slow failures=%d\n", failures);
   return failures?1:0;
 }

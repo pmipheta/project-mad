@@ -39,7 +39,7 @@ static int OscExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v76:
 #define ADC_INPUT_GMAX 3.5f
 #define ADC_FULL 4095
 #define ADC_MID 2048
-#define ADC_DC_ZERO_CT 0.0f   /* v89: DC mode zero */
+#define ADC_DC_ZERO_CT 415.0f /* v90: as main.c */
 #define OSC_H_DIVS 10
 #define CENTER_Y 120
 #define GRID_Y_STEP 40
@@ -47,10 +47,11 @@ static int OscExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v76:
 #define SCREEN_H 240
 static float volts_per_div=1;
 static int16_t new_y[240];
-static uint16_t osc_env_lo_ct[240], osc_env_hi_ct[240]; static uint8_t osc_env_on; static int16_t env_y_lo[240], env_y_hi[240]; static uint8_t env_y_on; static float osc_env_mean_ct, osc_env_rms_ct;   /* v83 peak detect */
+static uint16_t osc_env_lo_ct[240], osc_env_hi_ct[240]; static uint8_t osc_env_on; static int16_t env_y_lo[240], env_y_hi[240]; static uint8_t env_y_on; static float osc_env_mean_ct, osc_env_rms_ct, osc_env_dcrms_ct;   /* v83 peak detect; v90 DC rms */
 static int osc_plot_offset;
 static const float osc_tdivs_ms[]={.005f,.01f,.015f,.02f,.05f,.1f,.2f,.5f,1,2,5,6,10,20,50,100,200,500};
 static volatile uint32_t dbg_adc_pre;
+static float osc_dc_shift_v; /* v91 */
 static int osc_tdiv_i,osc_fwin=5,osc_calib=1,osc_trig_fall=0,osc_stable=1,osc_lock_auto=1;
 static float osc_fs_eff,osc_offset_ct,osc_offset_v,osc_v[240];
 static char osc_det[8];
@@ -58,7 +59,7 @@ static int16_t raw_samples[240];
 typedef struct {float vmax,vmin,vpp,vrms,dc_offset,freq;} OscMeasure;
 static OscMeasure osc_meas;
 static uint8_t osc_frame_valid;
-static float osc_raw_freq,osc_raw_vpp,osc_capture_tdiv;static float osc_raw_mean_ct,osc_raw_rms_ct,osc_raw_min_ct,osc_raw_max_ct;static uint8_t osc_raw_valid;
+static float osc_raw_freq,osc_raw_vpp,osc_capture_tdiv;static float osc_raw_mean_ct,osc_raw_rms_ct,osc_raw_min_ct,osc_raw_max_ct,osc_raw_dcrms_ct;static uint8_t osc_raw_valid;
 static uint32_t adc_measure_n=3200;
 static float dbg_adc_rate=800000,dbg_adc_step;
 static uint32_t dbg_adc_start,dbg_adc_decim,dbg_adc_n,dbg_adc_us,dbg_adc_frames;
@@ -90,6 +91,7 @@ static float AdcRateHz(int l);static uint8_t AdcSetRateLevel(int l);
 #define AS_MIN_VPP 0.05f
 #define AS_MIN_CYC 3.2f
 #define OSC_V_FILL_DIVS 4.0f
+#define OSC_V_DC_DIVS 2.0f
 #define OSC_FIT_CYCLES 2.5f
 #define FAST_O2_UNUSED
 static void MvStoreExt(uint32_t start,float step,uint32_t w,uint32_t n);static int OscAutoPickTdiv(float f);static void OscAutoApply(float vpp,int ti);static int AtbPickFast(float f);static int AtbPickSlow(float f);

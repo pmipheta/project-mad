@@ -28,7 +28,7 @@ harness = r'''
 #define ADC_INPUT_GAIN 1.25f  /* v88: the board value, so a path that forgets the gain (v84 edge points) shows up */
 #define ADC_FULL 4095
 #define ADC_MID 2048
-#define ADC_DC_ZERO_CT 0.0f   /* v89: DC mode zero */
+#define ADC_DC_ZERO_CT 415.0f /* v90: as main.c (board offset) */
 static int16_t raw_samples[N_SAMPLES]; static float osc_v[N_SAMPLES];
 static int osc_fwin = 5, osc_calib = 1; static float osc_offset_ct, osc_offset_v;
 static float osc_raw_freq = 0.0f, osc_fs_eff = 0.0f;                  /* v82: 0 = unknown frequency -> OscFiltWin keeps osc_fwin */
@@ -80,12 +80,12 @@ int main(void){
     osc_raw_freq = 0.0f; osc_fs_eff = 0.0f; g_ext = 0; }
   osc_fwin = 1; g_ext = 0; fill(2.4, 0.3, 300); OscProcessFrame();
   check("window 1: raw samples unchanged", fabs(osc_v[0] - (raw_samples[0]-osc_offset_ct)*3.3/4095*ADC_INPUT_GAIN) < 1e-6);
-  /* v89: DC coupling (PE0 = 0): no offset removed, 0 counts = 0 V, a 0..1900-count sine never goes negative */
+  /* v89: DC coupling (PE0 = 0): no mean removed; v90: 0 V = ADC_DC_ZERO_CT counts (the front-end offset), counts below it are clipped to 0 V (no negative half) */
   osc_calib = 0; osc_fwin = 1; g_ext = 0; g_ppc = 40; g_ph = 0; g_amp = 950;
   for (int i=0;i<N_SAMPLES;i++) raw_samples[i]=(int16_t)lround(950 + 950*sin(2*M_PI*i/40.0));
   OscProcessFrame(); { double lo=1e9, hi=-1e9; for (int i=0;i<N_SAMPLES;i++){ if(osc_v[i]<lo)lo=osc_v[i]; if(osc_v[i]>hi)hi=osc_v[i]; }
-    snprintf(nm,sizeof nm,"DC mode: trace 0..%.3f V, min %.4f V (>= 0), offset_v %.3f (0)", hi, lo, osc_offset_v);
-    check(nm, lo >= -1e-6 && fabs(hi - 1900*3.3/4095*ADC_INPUT_GAIN) < 0.01 && osc_offset_v == 0.0f); }
+    snprintf(nm,sizeof nm,"DC mode: trace %.3f..%.3f V = counts 0..1900 minus the %.0f-count zero, clipped at 0 V, offset_v %.3f (0)", lo, hi, (double)ADC_DC_ZERO_CT, osc_offset_v);
+    check(nm, lo == 0.0 && fabs(hi - (1900-ADC_DC_ZERO_CT)*3.3/4095*ADC_INPUT_GAIN) < 0.01 && osc_offset_v == 0.0f); }
   osc_calib = 1;
   printf("edge_filter failures=%d\n", fails); return fails ? 1 : 0;
 }'''
