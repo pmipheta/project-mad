@@ -33,6 +33,7 @@ static const float osc_tdivs_ms[] = {0.005f,0.01f,0.015f,0.02f,0.05f,0.1f,0.2f,0
 #define OSC_NT 18
 static uint32_t HAL_GetTick(void);
 static int osc_tdiv_i = 8; static int osc_trig_fall = 0; static uint8_t osc_stable = 1; static uint8_t osc_lock_auto = 1;
+static uint16_t osc_env_lo_ct[N_SAMPLES], osc_env_hi_ct[N_SAMPLES]; static uint8_t osc_env_on, slow_trig_on;   /* v86 SLOW peak detect / header */
 static volatile int16_t raw_samples[N_SAMPLES];
 static float osc_fs_eff, osc_raw_freq, osc_raw_vpp, osc_capture_tdiv;
 static float osc_raw_mean_ct, osc_raw_rms_ct, osc_raw_min_ct, osc_raw_max_ct; static uint8_t osc_raw_valid;
@@ -168,7 +169,17 @@ int main(void){
   /* lock switched off: free-run even at 20 ms/div */
   { osc_stable=0; AMP=0.9; F_HZ=30.0; osc_tdiv_i=T20; run(3.0); SlowSync(); SlowCaptureFrame(); int ok=(dbg_slow_trig==0); printf("%s lock off: 30 Hz @20 ms/div free-runs\n", ok?"PASS":"FAIL"); if(!ok) failures++; osc_stable=1; AMP=0.3; }
   /* --- roll mode (>= 100 ms/div) and no-signal stay free-running --- */
-  { AMP=0.3; F_HZ=1.0; osc_tdiv_i=T500; run(8.0); SlowSync(); SlowCaptureFrame(); int ok=(dbg_slow_trig==0); printf("%s 1 Hz @500 ms/div stays in roll mode (no trigger)\n", ok?"PASS":"FAIL"); if(!ok) failures++; }
+  { AMP=0.3; F_HZ=1.0; osc_tdiv_i=T500; run(8.0); SlowSync(); SlowCaptureFrame(); int ok=(dbg_slow_trig==0); printf("%s 1 Hz @500 ms/div stays in roll mode (no trigger)\n", ok?"PASS":"FAIL"); if(!ok) failures++;
+    ok = (slow_trig_on==0); printf("%s v86 header: that frame shows ROLL\n", ok?"PASS":"FAIL"); if(!ok) failures++; }
+  /* v86: < 8 points per period -> peak-detect band from the ticks behind each point; its height = the true swing at every SLOW T/DIV */
+  { int tis[] = {T50, T100, T200, T500}; AMP=0.9; F_HZ=30.0; double true_ct = 2*AMP/3.3*4095;
+    for (int k=0;k<4;k++){ osc_tdiv_i=tis[k]; run(6.0); SlowSync(); SlowCaptureFrame();
+      int plo=4095, phi=0, elo=4095, ehi=0; for(int i=0;i<N_SAMPLES;i++){ if(raw_samples[i]<plo)plo=raw_samples[i]; if(raw_samples[i]>phi)phi=raw_samples[i]; if(osc_env_lo_ct[i]<elo)elo=osc_env_lo_ct[i]; if(osc_env_hi_ct[i]>ehi)ehi=osc_env_hi_ct[i]; }
+      double ppc = osc_fs_eff/30.0; int want_on = ppc < 12.0; double r = osc_env_on ? (ehi-elo)/true_ct : (phi-plo)/true_ct;
+      int ok = (osc_env_on==want_on) && r > 0.97 && r < 1.03;
+      printf("%s v86 30 Hz @%3.0f ms/div (%.1f pts/period): band %s, drawn height %.3f of the true swing (points alone %.3f)\n", ok?"PASS":"FAIL", osc_tdivs_ms[tis[k]], ppc, osc_env_on?"on ":"off", r, (phi-plo)/true_ct);
+      if(!ok) failures++; }
+    AMP=0.3; F_HZ=1.0; }
   /* --- noise only must not give an invented number --- */
   AMP=0.0; NOISE=0.6; F_HZ=1.0; osc_tdiv_i=T200; run(4.0);
   { int ok = osc_raw_freq==0.0f; printf("%s noise only: %.3f Hz (must be 0)\n", ok?"PASS":"FAIL", osc_raw_freq); if(!ok)failures++; }

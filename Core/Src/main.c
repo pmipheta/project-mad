@@ -349,6 +349,7 @@ static uint8_t  osc_dirty     = 1;         /* สั่งวาดใหม่�
 
 /* โหมดจอ (ดูโหมดที่ใช้อยู่ได้ที่บรรทัด Trig: ในหน้ารายงาน / บนจอ LCD) */
 static uint8_t  osc_stable    = 1;   /* v56: 1 = AUTO (default): lock to the trigger edge from 45 Hz up, free-running below / without an edge | 0 = ROLL: never lock (UART 'm r') */
+static uint8_t  slow_trig_on  = 0;   /* v86: 1 = this SLOW frame is locked to an edge (header AUTO:R/F), 0 = it scrolls (ROLL) */
 static uint8_t  osc_lock_auto = 0;   /* set by the auto time base: 1 while the signal is >= 45 Hz (hysteresis 35 / 45 Hz) */   /* 1 = นิ่ง (trigger) | 0 = ไถล (roll)  */
 static int      trig_hold     = 0;   /* trigger offset ล่าสุดที่ใช้          */
 static int      dbg_trig_off  = 0;   /* เก็บไว้ตรวจย้อนหลังผ่าน SWD          */
@@ -1690,8 +1691,8 @@ static void MapToScreen(int trig_offset)
         if (y >= SCREEN_H)    y = SCREEN_H - 1;
         new_y[i] = (int16_t)y;
     }
-    /* v83: peak-detect band of this FAST frame (not for SLOW, a panned / zoomed frozen view, or the simulator) */
-    env_y_on = (uint8_t)(osc_env_on && !slow_active && !mv_view_on);
+    /* v83: peak-detect band of this frame (v86: FAST and SLOW; not for a panned / zoomed frozen view, or the simulator) */
+    env_y_on = (uint8_t)(osc_env_on && !mv_view_on);
     if (env_y_on) {
         const float kc = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;   /* v84: same scale as osc_v */
         for (int i = 0; i < N_SAMPLES; i++) {
@@ -2134,8 +2135,8 @@ static void DrawTopPanel(void)
     HDRT(buf, 72, 20, LIGHTGREY, 1, BLACK);
 
     /* โหมด trigger — AUTO:R / AUTO:F = จัดแนวให้นิ่ง, ROLL = ไถล */
-    if (slow_active)
-        snprintf(buf, sizeof(buf), "SLOW  ");
+    if (slow_active)                                         /* v86: SLOW shows its real state too: locked to an edge or scrolling */
+        snprintf(buf, sizeof(buf), slow_trig_on ? (osc_trig_fall ? "AUTO:F" : "AUTO:R") : "ROLL  ");
     else if (osc_stable && osc_lock_auto)
         snprintf(buf, sizeof(buf), "AUTO:%s", osc_trig_fall ? "F" : "R");
     else
@@ -3268,6 +3269,28 @@ static uint16_t SlowBuildPointsAt(uint16_t *out, uint32_t period_us, uint32_t t_
     return (uint16_t)(rs / rn);
 }
 
+/* v86 PEAK DETECT for SLOW (the twin of v83 in FAST): a point >= 1 ms averages its history ticks, so with < 8 points per period the
+ * drawn wave shrank (30 Hz: 125 px at 50 ms/div, 121 at 100, 110 at 200, a flat line at 500) while the readout stayed. Min / max of the ticks behind
+ * each point (the same ranges as SlowBuildPointsAt) -> osc_env_lo_ct / osc_env_hi_ct, drawn as a band by MapToScreen / TraceColumns.
+ * Points shorter than a tick (10 / 20 ms/div) always have >= 8 points per period at SLOW frequencies: nothing to do. */
+static void SlowEnvAt(uint32_t period_us, uint32_t t_view)
+{
+    if (period_us < 1000u) return;
+    for (uint32_t j = 0; j < N_SAMPLES; j++) {
+        uint32_t off_a = ((N_SAMPLES - j) * period_us + 999u) / 1000u;
+        uint32_t off_b = ((N_SAMPLES - 1u - j) * period_us + 999u) / 1000u;
+        uint16_t lo = 0xFFFF, hi = 0;
+        for (uint32_t tk = t_view - off_a; tk != t_view - off_b; tk++) {
+            uint16_t v = slow_hist[tk & (SLOW_HIST_N - 1u)];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        if (lo > hi) lo = hi = slow_hist[(t_view - 1u) & (SLOW_HIST_N - 1u)];
+        osc_env_lo_ct[j] = lo; osc_env_hi_ct[j] = hi;
+    }
+    osc_env_on = 1;
+}
+
 static uint16_t SlowBuildPoints(uint16_t *out, uint32_t period_us, uint16_t *rough_out)
 {
     return SlowBuildPointsAt(out, period_us, slow_last_t + 1u, 0u, rough_out);
@@ -3519,6 +3542,7 @@ static void SlowCaptureFrame(void)
     osc_meas = (OscMeasure){0};
     strcpy(osc_det, "INVALID");
     slow_ext_P = 0.0f;                                        /* v80: set below once this frame's frequency is known */
+    osc_env_on = 0;                                           /* v86: set below when the picture needs the peak-detect band */
 
     if (slow_valid_cnt == 0) { dbg_adc_ok = 0; osc_dirty = 1; return; }
     uint32_t ext_tv, ext_bk = 0, ext_pus = slow_period_us;    /* v80: view + time base of the drawn points, for SlowStoreExt / slow_ext_P */
@@ -3574,6 +3598,8 @@ static void SlowCaptureFrame(void)
         osc_raw_valid  = 0;
     }
     if (osc_raw_freq > 0.0f && ext_pus > 0u) slow_ext_P = (1.0e6f / (float)ext_pus) / osc_raw_freq;   /* v80: points per period of the drawn picture */
+    slow_trig_on = dbg_slow_trig;                             /* v86 header */
+    if (slow_ext_P > 0.0f && slow_ext_P < 12.0f) SlowEnvAt(ext_pus, ext_tv);   /* v86: < 12 points per period (8 still drew 3.5 % short): draw the band */
     osc_capture_tdiv = osc_tdivs_ms[osc_tdiv_i];
     dbg_adc_ok       = 1;
     dbg_adc_min      = vmin;
