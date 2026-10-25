@@ -2871,20 +2871,36 @@ static void FAST_O2 AdcCaptureFrame(void)
     if (edge_fit && start < edge_m) start = edge_m;   /* v78: untriggered / early edge -> keep the left margin */
     dbg_adc_start = start;
 
-    for (int i = 0; i < N_SAMPLES; i++) {   /* resample แบบเศษ + boxcar เฉลี่ย w จุด (เริ่มที่จุด trigger) */
+    /* v81: signal too fast for this time base (< 2 display points per period, e.g. 10 kHz at 6 ms/div: 444 kSa/s, w = 111 = 2.5 periods).
+     * A boxcar of w samples then leaves a fraction of a period in every point; its phase walks along the screen and draws a beat pattern
+     * instead of the mean. Average a WHOLE number of measured periods instead (nearest to w, >= 1): every point = the signal mean = a flat line. */
+    uint32_t wa = w;
+    {   float fp = fast_meas ? adc_last_good_f : osc_raw_freq;
+        if (fp > 0.0f) {
+            float P = dbg_adc_rate / fp;
+            if (2.0f * step >= P) {
+                float np = floorf((float)w / P + 0.5f);
+                if (np < 1.0f) np = 1.0f;
+                uint32_t wp = (uint32_t)(np * P + 0.5f);
+                if (wp >= 1u && wp <= n) wa = wp;
+            }
+        }
+    }
+    for (int i = 0; i < N_SAMPLES; i++) {   /* resample แบบเศษ + boxcar เฉลี่ย wa จุด (เริ่มที่จุด trigger) */
         int32_t c = (int32_t)start + (int32_t)((float)i * step + 0.5f);
-        int32_t lo = c - (int32_t)((w - 1u) / 2u);
+        int32_t lo = c - (int32_t)((wa - 1u) / 2u);
         uint32_t acc = 0;
         if (lo < 0) lo = 0;
-        if (lo + (int32_t)w > (int32_t)n) lo = (int32_t)n - (int32_t)w;
+        if (lo + (int32_t)wa > (int32_t)n) lo = (int32_t)n - (int32_t)wa;
         if (lo < 0) lo = 0;
-        for (uint32_t k = 0; k < w; k++) acc += adc_raw_buf[(uint32_t)lo + k];
-        uint16_t v = (uint16_t)(acc / w);
+        for (uint32_t k = 0; k < wa; k++) acc += adc_raw_buf[(uint32_t)lo + k];
+        uint16_t v = (uint16_t)(acc / wa);
         raw_samples[i] = (int16_t)v;
         if (v < vmin) vmin = v;
         if (v > vmax) vmax = v;
     }
-    MvStoreExt(start, step, w, n);   /* v54: keep the display points just outside the window, for X move while frozen */
+    dec = wa;                        /* v81: dbg_adc_decim = samples actually averaged per point */
+    MvStoreExt(start, step, wa, n);  /* v54: keep the display points just outside the window, for X move while frozen (v81: same averaging as the window) */
 
     /* แกนเวลา: อัตราสุ่มจริงหลัง resample (ไม่ใช้ค่าที่ตั้งไว้) */
     osc_fs_eff = dbg_adc_rate / step;
