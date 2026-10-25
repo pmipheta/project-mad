@@ -555,13 +555,13 @@ static void OscProcessFrame(void)
                 else if (OscExtPoint(m, &ev)) acc += ev;
                 else { ok = 0; break; }
             }
-            if (ok) { osc_v[i] = (acc / (float)win - osc_offset_ct) * k; continue; }
+            if (ok) { osc_v[i] = (acc / (float)win - osc_offset_ct) * kg; continue; }   /* v88: kg like the middle (v84 left k: edges 20 % short = spikes) */
             int a, n;
             if (crushed) { a = (i < half) ? 0 : (N_SAMPLES - win); n = win; }
             else         { int hh = (i < half) ? i : (N_SAMPLES - 1 - i); a = i - hh; n = 2 * hh + 1; }
             acc = 0.0f;
             for (int m = a; m < a + n; m++) acc += (float)raw_samples[m];
-            osc_v[i] = (acc / (float)n - osc_offset_ct) * k;
+            osc_v[i] = (acc / (float)n - osc_offset_ct) * kg;
         }
     }
 }

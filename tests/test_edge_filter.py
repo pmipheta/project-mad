@@ -25,7 +25,7 @@ harness = r'''
 #define ADC_INPUT_ENABLE 1
 #define N_SAMPLES 240
 #define ADC_VREF 3.3f
-#define ADC_INPUT_GAIN 1.0f   /* v84: harness signals are pin volts */
+#define ADC_INPUT_GAIN 1.25f  /* v88: the board value, so a path that forgets the gain (v84 edge points) shows up */
 #define ADC_FULL 4095
 #define ADC_MID 2048
 static int16_t raw_samples[N_SAMPLES]; static float osc_v[N_SAMPLES];
@@ -52,7 +52,7 @@ int main(void){
     double worst_err = 0; g_ext = 1;
     for (int q=0;q<NP;q++) for (int k=0;k<12;k++){ fill(ppcs[q], k*0.5, 1000); OscProcessFrame();
       for (int i=0;i<N_SAMPLES;i++){ double acc=0; for(int j=-h;j<=h;j++) acc+=lround(sig(i+j));
-        double ideal=(acc/wins[w]-osc_offset_ct)*3.3/4095; if (fabs(osc_v[i]-ideal)>worst_err) worst_err=fabs(osc_v[i]-ideal); } }
+        double ideal=(acc/wins[w]-osc_offset_ct)*3.3/4095*ADC_INPUT_GAIN; if (fabs(osc_v[i]-ideal)>worst_err) worst_err=fabs(osc_v[i]-ideal); } }
     snprintf(nm,sizeof nm,"FAST with real outside points, window %d, 2.4..120 pts/cycle: edges = ideal filter (max error %.4f V, limit 0.002)", wins[w], worst_err);
     check(nm, worst_err < 0.002);
     /* SLOW / no outside data: fallback, no spike anywhere incl. 9.6 pts/cycle (the v74 miss) */
@@ -62,7 +62,7 @@ int main(void){
     check(nm, worst <= 1.15);
     /* slow signal without outside data: edges follow the wave */
     double err = 0; fill(120.0, 0.7, 1200); OscProcessFrame();
-    for (int i=0;i<N_SAMPLES;i++){ double t = 1200*sin(2*M_PI*i/120.0+0.7)*3.3/4095; if (fabs(osc_v[i]-t) > err) err = fabs(osc_v[i]-t); }
+    for (int i=0;i<N_SAMPLES;i++){ double t = 1200*sin(2*M_PI*i/120.0+0.7)*3.3/4095*ADC_INPUT_GAIN; if (fabs(osc_v[i]-t) > err) err = fabs(osc_v[i]-t); }
     snprintf(nm,sizeof nm,"no outside data, slow sine 120 pts/cycle, window %d: max error %.3f V incl. edges (limit 0.12 V of 1.93 Vpp)", wins[w], err);
     check(nm, err < 0.12);
   }
@@ -71,14 +71,14 @@ int main(void){
     g_ext = 1; osc_fs_eff = 48000.0f;
     for (int w=0; w<3; w++) for (int q=0; q<8; q++) for (int k=0; k<6; k++) {
       osc_fwin = wins2[w]; osc_raw_freq = (float)(48000.0 / ppcs2[q]); fill(ppcs2[q], k*0.5, 1000); OscProcessFrame();
-      double lo=1e9, hi=-1e9, rlo=1e9, rhi=-1e9; for (int i=0;i<N_SAMPLES;i++){ if(osc_v[i]<lo)lo=osc_v[i]; if(osc_v[i]>hi)hi=osc_v[i]; double r=(raw_samples[i]-osc_offset_ct)*3.3/4095; if(r<rlo)rlo=r; if(r>rhi)rhi=r; }
+      double lo=1e9, hi=-1e9, rlo=1e9, rhi=-1e9; for (int i=0;i<N_SAMPLES;i++){ if(osc_v[i]<lo)lo=osc_v[i]; if(osc_v[i]>hi)hi=osc_v[i]; double r=(raw_samples[i]-osc_offset_ct)*3.3/4095*ADC_INPUT_GAIN; if(r<rlo)rlo=r; if(r>rhi)rhi=r; }
       double ratio = (hi-lo)/(rhi-rlo); if (ratio < worst){ worst = ratio; snprintf(wn, sizeof wn, "window %d at %.1f pts/cycle", wins2[w], ppcs2[q]); } }
     snprintf(nm,sizeof nm,"known frequency: drawn height >= 0.97 of the raw points (worst %.3f, %s)", worst, wn); check(nm, worst >= 0.97);
     osc_fwin = 5; osc_raw_freq = 400.0f; check("known frequency, 120 pts/cycle: FILTER 5 is kept", OscFiltWin() == 5);
     osc_fwin = 5; osc_raw_freq = (float)(48000.0/23.6); check("known frequency, 23.6 pts/cycle: FILTER 5 is narrowed", OscFiltWin() < 5);
     osc_raw_freq = 0.0f; osc_fs_eff = 0.0f; g_ext = 0; }
   osc_fwin = 1; g_ext = 0; fill(2.4, 0.3, 300); OscProcessFrame();
-  check("window 1: raw samples unchanged", fabs(osc_v[0] - (raw_samples[0]-osc_offset_ct)*3.3/4095) < 1e-6);
+  check("window 1: raw samples unchanged", fabs(osc_v[0] - (raw_samples[0]-osc_offset_ct)*3.3/4095*ADC_INPUT_GAIN) < 1e-6);
   printf("edge_filter failures=%d\n", fails); return fails ? 1 : 0;
 }'''
 (OUT/'edge.c').write_text(harness)
