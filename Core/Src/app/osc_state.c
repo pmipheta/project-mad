@@ -54,9 +54,6 @@ uint16_t cursor_x = SCREEN_W / 2;  /* vertical cursor at screen centre  */
 Button btn_up, btn_down, btn_hold, btn_set;
 Button btn_vdiv, btn_tdiv, btn_filt, btn_trig;   /* v61 */
 
-/* --- Mock sine phase (remove after merge) ---------------------------------- */
-float mock_phase = 0.0f;
-
 #if SHOW_FPS
 uint32_t fps_frames = 0, last_fps_tick = 0;
 
@@ -85,7 +82,6 @@ volatile uint32_t dbg_adc_pre = 0;   /* pre-trigger display points used by the l
 volatile uint32_t prof_us[8];   /* PROFILING (us): 0 capture, 1 process+measure+atb, 2 draw, 3 whole frame, 4 header, 5 loop period, 6 C1/C2 move (v85) */
 
 
-const char  *gen_wave_names[]  = {"SINE", "SQUARE", "TRI", "SAW"};
 const float  osc_vdivs[]       = {0.0001f, 0.0002f, 0.0005f,
                                           0.001f,  0.002f,  0.005f,
                                           0.01f,   0.02f,   0.05f,
@@ -95,14 +91,6 @@ const float  osc_tdivs_ms[]    = {0.005f, 0.01f, 0.015f, 0.02f, 0.05f, 0.1f, 0.2
 const char  *osc_set_names[]   = {"FILTER", "TRIG", "V/DIV", "T/DIV"};
 const char  *osc_hold_names[]  = {"C1", "C2", "V/DIV"};
 
-/* --- generator (ส่วน input ของ simulator) --- */
-int      gen_wave      = 0;         /* 0=SINE 1=SQUARE 2=TRI 3=SAW      */
-float    gen_freq      = 1000.0f;   /* 100 .. 5000 Hz                   */
-float    gen_amp       = 0.5f;      /* 0.1 .. 1.5 V                     */
-float    gen_dc        = 1.65f;     /* 0.5 .. 2.5 V                     */
-float    gen_noise     = 0.05f;     /* 0 .. 0.3 V                       */
-float    gen_ph        = 0.0f;      /* เฟสสะสม (roll)                    */
-
 /* --- oscilloscope settings --- */
 int      osc_vdiv_i    = OSC_VDIV_DEF; /* -> 1.0 V/div; table reaches 0.0001 V/div */
 int      osc_tdiv_i    = OSC_TDIV_DEF;  /* -> 1.0 ms/div                */
@@ -111,14 +99,13 @@ int      osc_trig_fall = 0;         /* 0 = rising, 1 = falling          */
 int      osc_sidx      = 0;         /* setting ที่กำลังปรับ              */
 int      osc_c1        = 53, osc_c2 = 213;   /* v85: LCD x of the C1/C2 lines (0..SCREEN_W-1, 1 px per step; were sample indices 40 / 160) */
 uint8_t  osc_cur_dirty = 0;         /* v85: C1/C2 moved while frozen: repaint only the cursor columns */
-uint8_t  osc_calib     = 1;         /* 1 = AC coupling (calibrate offset), 0 = DC; v90: toggled by holding AUTO (PB2) or UART "cal" */
+uint8_t  osc_calib     = 1;         /* 1 = AC coupling (calibrate offset), 0 = DC; v90: toggled by holding AUTO (PB2) */
 uint8_t  osc_dirty     = 1;         /* สั่งวาดใหม่แม้อยู่โหมด HOLD         */
 
 /* โหมดจอ (ดูโหมดที่ใช้อยู่ได้ที่บรรทัด Trig: ในหน้ารายงาน / บนจอ LCD) */
-uint8_t  osc_stable    = 1;   /* v56: 1 = AUTO (default): lock to the trigger edge from 45 Hz up, free-running below / without an edge | 0 = ROLL: never lock (UART 'm r') */
+uint8_t  osc_stable    = 1;   /* v56: 1 = AUTO (default): lock to the trigger edge from 45 Hz up, free-running below / without an edge | 0 = ROLL: never lock (PC3 short) */
 uint8_t  slow_trig_on  = 0;   /* v86: 1 = this SLOW frame is locked to an edge (header AUTO:R/F), 0 = it scrolls (ROLL) */
 uint8_t  osc_lock_auto = 0;   /* set by the auto time base: 1 while the signal is >= 45 Hz (hysteresis 35 / 45 Hz) */   /* 1 = นิ่ง (trigger) | 0 = ไถล (roll)  */
-int      trig_hold     = 0;   /* trigger offset ล่าสุดที่ใช้          */
 int      dbg_trig_off  = 0;   /* เก็บไว้ตรวจย้อนหลังผ่าน SWD          */
 float    osc_offset_ct = (float)ADC_MID;
 float    osc_offset_v  = 0.0f;
@@ -161,15 +148,3 @@ float    adc_rough_ratio = 0.0f; /* mean |sample-to-sample change| / Vpp of the 
 uint32_t adc_over_t = 0;        /* tick of the last 'above readout limit' frame (display keeps >2.1MHz for 1.5 s: no blinking) */
 int      osc_plot_offset = 0;
 
-/* --- v54: MOVE (only acts while frozen). All zero = identical to v53. --- */
-int      mv_y_steps  = 0;        /* vertical offset, 0.1 div per step, +-40 (display only) */
-int      mv_x_pts    = 0;        /* horizontal pan of the frozen capture in display points (<0 = earlier in time) */
-int      mv_x_min    = 0, mv_x_max = 0;   /* pan range that the frozen capture really holds (set at freeze) */
-uint8_t  mv_axis_x   = 0;        /* 0 = MOVE:Y, 1 = MOVE:X */
-uint8_t  mv_prev_hold = 0;       /* freeze edge detector */
-uint8_t  mv_view_on  = 0;        /* 1 = the panned view mv_view_v is drawn instead of osc_v */
-uint8_t  mv_zoom_x   = 1;        /* v57: time zoom x1..x64 (frozen only; v58 ceiling) */
-uint8_t  mv_zoom_step = 0;       /* v59: ONE shared zoom step 0..6 drives both axes (x = 1<<step, y = 1<<min(step,5)) */
-uint8_t  mv_zoom_y   = 1;        /* v57: volt zoom x1..x32 (frozen only; v58 ceiling) */
-int      mv_x_q      = 0;        /* v57: pan in 1/16 display point while mv_zoom_x > 1 (mv_x_pts = floor(mv_x_q/16)) */
-float    mv_view_v[N_SAMPLES];

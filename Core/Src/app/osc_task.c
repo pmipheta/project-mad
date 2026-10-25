@@ -15,7 +15,6 @@ void OscTask(void *argument)
 
     /* v66b: one-shot start-up, runs AFTER vTaskStartScheduler() so xSemaphoreTake/Give are legal
      * (xOscMutex was created in main() before xTaskCreate; creation does not block, only Take/Give must wait for the scheduler). */
-    UartPanel();              /* แสดงเมนู/สถานะครั้งแรกออกพอร์ต serial */
     DrawGrid();
     DrawCursor();
     DrawTopPanel();
@@ -26,10 +25,8 @@ void OscTask(void *argument)
         APP_LOCK();
         uint32_t now = HAL_GetTick();
 
-#if ADC_INPUT_ENABLE
         if (adc_pend && (hold_active || osc_auto_stage || (now - adc_pd_tick) > 400u)) AdcAbortPending();   /* nobody collected it: give the ADC and the 1 kHz sampler back */
-#endif
-        /* --- Buttons and UART commands: InputTask (input_task.c), between two passes --- */
+        /* --- Buttons: InputTask (input_task.c), between two passes --- */
         if (osc_cur_dirty) {      /* v85: C1/C2 moved while frozen: repaint the cursor columns now, not on the 33 ms frame */
             if (hold_active && cursors_on && !osc_dirty) {
                 { uint32_t pq0 = DWT->CYCCNT; CursorsMoveFast(); prof_us[6] = AdcElapsedUs(pq0); }
@@ -61,37 +58,13 @@ void OscTask(void *argument)
 
             if (should_draw)
             {
-                /* ============================================================
-                 * INTEGRATION POINT — replace everything in this block when merging
-                 * ============================================================
-                 * Current (mockup):
-                 *   GenerateFakeSineWave() fills raw_samples[] + osc_meas.
-                 *
-                 * After merge (teammate's code):
-                 *   if (!new_frame_ready) goto skip_draw;
-                 *   new_frame_ready = 0;
-                 *   (teammate has already filled raw_samples[] and osc_meas)
-                 * ============================================================ */
-                /* SIM_STREAM_MODE: 2 = function generator (ตาม simulator, ค่าเริ่มต้น)
-                 *                  1 = สตรีมต่อเนื่องเดิม   0 = sine เดิมที่วนลูป
-                 * ทีม sampling ต่อข้อมูลจริงตรงนี้ (แทน GenFrame)                    */
-                if (!hold_active) {               /* HOLD = freeze ข้อมูลไว้ ไม่ generate ใหม่ */
-#if ADC_INPUT_ENABLE
+                if (!hold_active) {               /* HOLD = freeze: no new capture */
                     SlowSync();                   /* T/DIV >= 50 ms -> SLOW (ring), ไม่งั้น FAST (burst) */
                     { uint32_t pc0 = DWT->CYCCNT;
                     if (slow_active) { AdcAbortPending(); OSC_LOCK(); SlowCaptureFrame(); OSC_UNLOCK(); }
                     else             AdcCaptureFrame();   /* p30: อ่านข้อมูลจริงจาก ADC (PA0) */
                     prof_us[0] = AdcElapsedUs(pc0); }
                     if (!osc_frame_valid) goto skip_draw;
-#else
-                    osc_capture_tdiv = osc_tdivs_ms[osc_tdiv_i];
-                    osc_fs_eff = N_SAMPLES / (osc_capture_tdiv * OSC_H_DIVS / 1000.0f);
-                    if      (SIM_STREAM_MODE == 2) GenFrame();
-                    else if (SIM_STREAM_MODE == 1) SimSamplingStream();
-                    else                           GenerateFakeSineWave();
-                    osc_frame_valid = 1;
-                    new_frame_ready = 1;
-#endif
                 }
                 if (!osc_frame_valid) goto skip_draw;
                 uint32_t pm0 = DWT->CYCCNT;
@@ -102,9 +75,7 @@ void OscTask(void *argument)
                 OscAutoTimebase();      /* AUTO: สลับ FAST/SLOW + T/DIV ตามความถี่ (ถ้าไม่ได้ปรับเอง) */
                 prof_us[1] = AdcElapsedUs(pm0);
                 new_frame_ready = 0;
-#if ADC_INPUT_ENABLE
                 if (!hold_active && !osc_auto_stage && trigger_mode != TRIG_SINGLE && !slow_active) AdcPrestart();   /* the next capture runs by DMA while we draw */
-#endif
 
 #if SHOW_FPS
                 dbg_px_frame = 0;
@@ -114,28 +85,7 @@ void OscTask(void *argument)
 
                 /* osc_stable = 1: จัดแนว trigger (ใช้ขอบ RISE/FALL ตามค่า TRIG) -> กราฟนิ่ง
                  * osc_stable = 0: ไม่จัดแนว -> ข้อมูลใหม่เข้าขวา เส้นไถลซ้าย (roll) */
-                int trig_offset = 0;
-                if (osc_stable) {
-#if ADC_INPUT_ENABLE
-                    /* p38: จัดแนว trigger ตั้งแต่ตอนจับข้อมูล (AdcCaptureFrame) แล้ว
-                     * -> หน้าต่างเริ่มที่จุด trigger จริง ไม่ต้องหาใหม่/ไม่ต้องวนกลับบัฟเฟอร์
-                     *    (เดิม FindTrigger หาใหม่แล้วได้คนละจุด ทำให้จุดวนกลับเลื่อนกลางจอ) */
-                    trig_offset = 0;
-                    trig_hold   = 0;
-                    (void)FindTrigger;   /* p39: โหมด ADC จัดแนวตอนจับข้อมูลแล้ว */
-#else
-                    int t = FindTrigger();
-                    if (t >= 0) {
-                        trig_hold   = t;
-                        trig_offset = t;
-                    } else {
-                        /* หน้าต่างสั้นกว่าหนึ่งคาบ (ความถี่ต่ำกว่า time base) -> หาขอบไม่ได้
-                         * เดิมใช้ค่า trig_hold เก่า => รูปวาดไม่ตรงจุด -> กระโดด/ขาด
-                         * ใหม่: วาดแบบไถล (offset 0) ต่อเนื่องแทน */
-                        trig_offset = 0;
-                    }
-#endif
-                }
+                int trig_offset = 0;    /* p38: the capture (AdcCaptureFrame / SlowCaptureFrame) already starts at the trigger edge */
                 dbg_trig_off = trig_offset;
                 uint32_t pd0 = DWT->CYCCNT;
                 uint8_t hold_frame = OscFrameHold(HAL_GetTick());

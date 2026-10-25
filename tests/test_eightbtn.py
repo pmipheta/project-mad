@@ -1,5 +1,5 @@
-"""Host test of the v62 eight-button panel (PB0-3 as v61; PA3/PC0/PC3/PF3 revised). Real HandleButtons/ButtonJustPressed/ButtonRepeat/ButtonRaw/ActIncrease/ActDecrease/ActUp/ActDown/
-ActSelectSetting/ActToggleTrigEdge/OscSetIndex extracted from Core/Src/main.c; GPIO, OscAdjust, MvMove, ActAuto, ActToggleFastSlow, ActAutoMode are recording stubs.
+"""Host test of the v62 eight-button panel (PB0-3 as v61; PA3/PC0/PC3/PF3 revised). Real HandleButtons/ButtonJustPressed/ButtonRepeat/ButtonRaw/ActIncrease/ActDecrease/
+ActSelectSetting/ActToggleTrigEdge/OscSetIndex extracted from Core/Src/main.c; GPIO, OscAdjust, ActAuto, ActToggleFastSlow, ActAutoMode are recording stubs.
 Not a board test."""
 from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
@@ -17,7 +17,7 @@ def function(name):
     while d:
         d += (nocom[i] == '{') - (nocom[i] == '}'); i += 1
     return nocom[m.start():i]
-names = ['ButtonJustPressed','ButtonRepeat','ButtonRaw','HandleButtons','ActIncrease','ActDecrease','ActUp','ActDown','ActSelectSetting','ActToggleTrigEdge','OscSetIndex','OscSetName','ActToggleStable','OscCursorSelected']
+names = ['ButtonJustPressed','ButtonRepeat','ButtonRaw','HandleButtons','ActIncrease','ActDecrease','ActSelectSetting','ActToggleTrigEdge','OscSetIndex','OscSetName','ActToggleStable','OscCursorSelected']
 funcs = '\n'.join(function(n) for n in names)
 macros = '\n'.join(re.search(r'^#define '+n+r'\s+[^/\n]+', nocom, re.M)[0] for n in
   ['BTN_CURSOR_LONG_MS','BTN_ACDC_LONG_MS','BTN_UP_PIN','BTN_DOWN_PIN','BTN_HOLD_PIN','BTN_SET_PIN','BTN_VDIV_PIN','BTN_TDIV_PIN','BTN_FILT_PIN','BTN_TRIG_PIN','BTN_MAN_LONG_MS','BTN_DEBOUNCE_MS','BTN_LONG_MS',
@@ -69,22 +69,20 @@ static int HAL_GPIO_ReadPin(GPIO_TypeDef *p, uint16_t pin){
     if (p==&PC && pin==BTN_MAN_PIN) return low ? 1 : 0;     /* active high */
     return low ? 0 : 1;                                       /* active low */
 }
-static int n_adj_p, n_adj_m, n_move, n_auto, n_fs, n_am, n_sync, n_cpl;
+static int n_adj_p, n_adj_m, n_auto, n_fs, n_am, n_cpl;
 static void OscAdjust(int d){ if (d>0) n_adj_p++; else n_adj_m++; }
-static void MvMove(int d, int n){ (void)d;(void)n; n_move++; }
-static void MvSync(void){ n_sync++; }
 static void ActAuto(void){ n_auto++; }
 static void ActToggleFastSlow(void){ n_fs++; }
 static void ActAutoMode(void){ n_am++; }
 static void ActToggleCoupling(void){ n_cpl++; }
 static void ActIncrease(int n); static void ActDecrease(int n); static void ActSelectSetting(const char *name); static void ActToggleTrigEdge(void);
 static uint8_t ButtonLongPress(Button *b, uint32_t now){ (void)b;(void)now; return 0; }
-static void ActUp(int n); static void ActDown(int n); static void OscSetIndex(int idx); static const char *OscSetName(void); static void ActFreeze(void); static void ActToggleStable(void);
+static void OscSetIndex(int idx); static const char *OscSetName(void); static void ActFreeze(void); static void ActToggleStable(void);
 static int OscCursorSelected(void); static uint32_t btn_rep_ms = BTN_REPEAT_MS;   /* v85 globals the extracted code uses */
 ''' + funcs + r'''
 static int fails = 0;
 #define CHECK(name, cond) do { int ok_ = !!(cond); printf("%s %s\n", ok_?"PASS":"FAIL", name); if(!ok_) fails++; } while(0)
-static void clr(void){ osc_dirty=0; n_adj_p=n_adj_m=n_move=n_auto=n_fs=n_am=n_freeze=n_cpl=0; }
+static void clr(void){ osc_dirty=0; n_adj_p=n_adj_m=n_auto=n_fs=n_am=n_freeze=n_cpl=0; }
 static void press(int port, int pin, int on){ if(on) pressed_mask[port] |= pin; else pressed_mask[port] &= ~pin; }
 static uint32_t T = 1000;
 static void init(void){
@@ -162,7 +160,7 @@ int main(void){
     press(2,8,1); run(1600); CHECK("(h2) PC3 long after PF3 freeze: C1->C2", osc_sidx==1); press(2,8,0); run(300);
     CHECK("(h2) release: still frozen, stable untouched", hold_active==1 && osc_stable==1);
     press(2,8,1); run(1600); press(2,8,0); run(300); CHECK("(h2) second long: C2->C1", osc_sidx==0 && hold_active==1);
-    CHECK("(h) none of the 4 pins call move/adjust", n_move==0 && n_adj_p==0 && n_adj_m==0);
+    CHECK("(h) none of the 4 pins call adjust", n_adj_p==0 && n_adj_m==0);
     /* PF3 debounce */
     hold_active = 0; init(); osc_stable = 1; press(3,8,1); run(20); press(3,8,0); run(20); press(3,8,1); run(20); press(3,8,0); run(20);
     CHECK("PF3: bounce within 200ms = one freeze toggle", hold_active==1 && n_freeze==1 && osc_stable==1);
@@ -172,18 +170,13 @@ int main(void){
     CHECK("PA3: bounce = one toggle (FILTER->V/DIV, not back)", osc_sidx==2);
     init(); osc_sidx=2; press(2,1,1); run(20); press(2,1,0); run(20); press(2,1,1); run(20); press(2,1,0); run(20);
     CHECK("PC0: bounce = one toggle (->FILTER)", osc_sidx==0);
-    /* (d) + / - never move while frozen; UART u/d still do */
+    /* (d) + / - adjust the selected setting while frozen too */
     hold_active = 1; init();
     tap(1,1,100); tap(1,2,100);
     CHECK("frozen: PB0 = OscAdjust(+1)", n_adj_p==1);
     CHECK("frozen: PB1 = OscAdjust(-1)", n_adj_m==1);
-    CHECK("frozen: physical +/- never MvMove", n_move==0);
     clr(); ActIncrease(3); ActDecrease(3);
-    CHECK("ActIncrease/ActDecrease frozen on C1: n adjust steps (v85 cursor glide), no move", osc_sidx==0 && n_adj_p==3 && n_adj_m==3 && n_move==0);
-    clr(); ActUp(1); ActDown(1);
-    CHECK("UART u/d frozen still MvMove, no adjust", n_move==2 && n_adj_p==0 && n_adj_m==0);
-    hold_active = 0; clr(); ActUp(1); ActDown(1);
-    CHECK("UART u/d live still OscAdjust", n_adj_p==1 && n_adj_m==1 && n_move==0);
+    CHECK("ActIncrease/ActDecrease frozen on C1: n adjust steps (v85 cursor glide)", osc_sidx==0 && n_adj_p==3 && n_adj_m==3);
     /* hold-repeat on PB0 */
     hold_active = 0; init(); press(1,1,1); run(250); CHECK("PB0 first step immediate, no repeat before 300ms", n_adj_p==1);
     run(200); CHECK("PB0 repeats after 300ms hold", n_adj_p>=3);
@@ -225,33 +218,27 @@ def body(t, n):
 bt = before.read_text() if before.exists() else None
 checks = [
  ('Slow block identical to v61', bt is None or slow(src)==slow(bt)),
- ('UART dispatch (UartCommand) unchanged vs v62', bt is None or body(src,'UartCommand')==body(bt,'UartCommand')),
 ]
 if bt:
-    for f in ['ActAuto','ActUp','ActDown','ActFreeze','ActToggleFastSlow','ActAutoMode','ActToggleMoveAxis','ActMoveCenter','OscAdjust','OscSetIndex','ButtonRepeat','ButtonJustPressed']:
+    for f in ['ActFreeze','ActToggleFastSlow','ActAutoMode','OscAdjust','OscSetIndex','ButtonRepeat','ButtonJustPressed']:
         checks.append((f+' body unchanged', body(src,f)==body(bt,f)))
     added = [l for l in __import__('difflib').unified_diff(bt.splitlines(), src.splitlines(), lineterm='', n=0) if l.startswith(('+','-')) and not l.startswith(('+++','---'))]
     checks.append(('diff vs v61 bounded (<=170 changed lines; grew with v72 header format, v73 V/DIV table, v74-v76 filter/grid): %d' % len(added), len(added)<=170))
     print('diff changed lines vs v61:', len(added))
 def hb(t): return body(t,'HandleButtons')
-mb = re.search(r"case 'm': \{.*?\n        \}", re.sub(r'/\*.*?\*/','',body(src,'UartCommand'),flags=re.S), re.S)[0] if False else None
-um = re.sub(r'/\*.*?\*/','',body(src,'UartCommand'),flags=re.S)
-mcase = um[um.index("case 'm':"):um.index("case 'z'")]
 checks += [
- ('(d) PF3 handler calls ActFreeze (same fn as UART h), exactly once in HandleButtons', hb(src).count('ActFreeze()') == 1 and 'if (ButtonJustPressed(&btn_trig, now)) ActFreeze();' in hb(src)),
- ('(d) ActFreeze still defined and reachable from UART h', 'static void ActFreeze(void)' in src and "case 'h': case 'r': ActFreeze(); break;" in src),
- ('(d) ActFreeze callers: UART h + PF3 only (def+2 calls)', len(re.findall(r'\bActFreeze\s*\(', re.sub(r'/\*.*?\*/','',src,flags=re.S))) == 3),
+ ('(d) PF3 handler calls ActFreeze, exactly once in HandleButtons', hb(src).count('ActFreeze()') == 1 and 'if (ButtonJustPressed(&btn_trig, now)) ActFreeze();' in hb(src)),
+ ('(d) ActFreeze still defined', 'static void ActFreeze(void)' in src),
+ ('(d) ActFreeze callers: PF3 only (def+1 call)', len(re.findall(r'\bActFreeze\s*\(', re.sub(r'/\*.*?\*/','',src,flags=re.S))) == 2),
  ('(d) only PC3 short calls ActToggleStable in HandleButtons', hb(src).count('ActToggleStable()') == 1),
- ('(e) ActToggleStable body == UART m bare toggle (flip + osc_dirty=1)', re.sub(r'\s+','',body(src,'ActToggleStable')) == 'staticvoidActToggleStable(void){osc_stable=(uint8_t)!osc_stable;osc_dirty=1;}' and 'else{osc_stable=(uint8_t)!osc_stable;}osc_dirty=1;break;' in re.sub(r'\s+','',mcase)),
- ('UartCommand m case unchanged vs v62', mcase == (lambda b: b[b.index("case 'm':"):b.index("case 'z'")])(re.sub(r'/\*.*?\*/','',body(bt,'UartCommand'),flags=re.S)) if bt else True),
+ ('(e) ActToggleStable body = flip + osc_dirty=1', re.sub(r'\s+','',body(src,'ActToggleStable')) == 'staticvoidActToggleStable(void){osc_stable=(uint8_t)!osc_stable;osc_dirty=1;}'),
  ('PC3 long-press block unchanged', 'if (hold_active) ActSelectSetting(strcmp(OscSetName(), "C1") == 0 ? "C2" : "C1");' in src and 'BTN_CURSOR_LONG_MS' in hb(src)),
 ]
 checks += [('PB2 short -> ActAuto, long -> ActToggleCoupling', 'ActToggleCoupling(); }' in src and '>= 40u) ActAuto();' in src and 'HAL_GPIO_ReadPin(ACDC_PORT' not in src),
  ('PB0/PB1 -> ActIncrease/ActDecrease', 'ActIncrease(n);' in src and 'ActDecrease(n);' in src),
- ('ActIncrease/Decrease have no hold_active branch', 'hold_active' not in body(src,'ActIncrease')+body(src,'ActDecrease') and 'MvMove' not in body(src,'ActIncrease')+body(src,'ActDecrease')),
+ ('ActIncrease/Decrease have no hold_active branch', 'hold_active' not in body(src,'ActIncrease')+body(src,'ActDecrease')),
  ('pins PA3/PC0/PC3/PF3 defined', all(t in src for t in ['BTN_VDIV_PORT   GPIOA','BTN_VDIV_PIN    GPIO_PIN_3','BTN_TDIV_PIN    GPIO_PIN_0','BTN_FILT_PIN    GPIO_PIN_3','BTN_TRIG_PORT   GPIOF','BTN_TRIG_PIN    GPIO_PIN_3'])),
  ('new pins init pull-up input; GPIOA/C/F clocks', 'btn_init.Pin = BTN_VDIV_PIN' in src and '__HAL_RCC_GPIOF_CLK_ENABLE()' in src and 'GPIO_PULLUP' in src),
- ('UART s/v/t/h/z/F/A keys unchanged', all(t in src for t in ["case 's': OscSetIndex(osc_sidx + 1); break;","case 'F': ActToggleFastSlow(); break;","case 'A': ActAutoMode(); break;","case 'z': case 'Z': ActAuto(); break;","case 'v': OscSetIndex(2);","case 't': OscSetIndex(3);"])),
 ]
 for n, ok in checks:
     print(('PASS ' if ok else 'FAIL ')+n); cfail += (not ok)

@@ -5,27 +5,6 @@ static int      OscCursorX(int idx);
 static void     DrawLineBresenham(int x0, int y0, int x1, int y1, uint16_t color);
 
 /* --------------------------------------------------------------------------
- * FindTrigger
- * Scan raw_samples[] for the first rising edge crossing ADC_MID.
- * Returns the sample index to start rendering from (trigger offset).
- * -------------------------------------------------------------------------- */
-int FindTrigger(void)
-{
-    /* หาจุด trigger จากข้อมูลที่สอบเทียบ/กรองแล้ว (osc_v แกว่งรอบ 0 = auto level)
-     * ใช้ขอบตามที่ตั้งไว้ใน TRIG: RISE = ผ่าน 0 ขาขึ้น | FALL = ผ่าน 0 ขาลง
-     * ค้นแค่ 3/4 ของบัฟเฟอร์ เพื่อให้เหลือข้อมูลพอวาดเต็มจอหลังจุด trigger */
-    int limit = (N_SAMPLES * 3) / 4;
-    if (osc_trig_fall) {
-        for (int i = 1; i < limit; i++)
-            if (osc_v[i - 1] >= 0.0f && osc_v[i] < 0.0f) return i;
-    } else {
-        for (int i = 1; i < limit; i++)
-            if (osc_v[i - 1] < 0.0f && osc_v[i] >= 0.0f) return i;
-    }
-    return -1;   /* หน้าต่างนี้ไม่เจอขอบ -> ใช้ค่าเดิม (ภาพไม่กระโดด) */
-}
-
-/* --------------------------------------------------------------------------
  * MapToScreen
  * Convert raw_samples[] to screen Y coordinates, starting from trig_offset.
  * Physical mapping: each grid division = GRID_Y_STEP px = volts_per_div V.
@@ -33,14 +12,14 @@ int FindTrigger(void)
 void MapToScreen(int trig_offset)
 {
     osc_plot_offset = trig_offset;
-    const float *vs = mv_view_on ? mv_view_v : osc_v;       /* v54: panned view while frozen */
+    const float *vs = osc_v;
     /* v91: DC: draw the trace shifted down so its middle ((max+min)/2 of the drawn points) sits exactly on CENTER_Y.
      *      Display only: osc_v, Mx/Mn/Vp/Rs keep the real DC volts. AC: no shift. */
     float dc_sh = 0.0f;
     if (!osc_calib) {
         float lo = vs[0], hi = vs[0];
         for (int i = 1; i < N_SAMPLES; i++) { if (vs[i] < lo) lo = vs[i]; if (vs[i] > hi) hi = vs[i]; }
-        if (osc_env_on && !mv_view_on) {   /* v91: with the peak band drawn, centre what is seen: at slow T/DIV (2..6 ms) the trace is
+        if (osc_env_on) {                  /* v91: with the peak band drawn, centre what is seen: at slow T/DIV (2..6 ms) the trace is
                                             *      the whole-period mean (flat) and the band is the real 0..peak wave */
             const float kc = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;
             for (int i = 0; i < N_SAMPLES; i++) {
@@ -60,15 +39,15 @@ void MapToScreen(int trig_offset)
 
         /* Convert count -> voltage -> pixel offset */
         float v = vs[src] - dc_sh;
-        int y = CENTER_Y - (int)(v / volts_per_div * (float)(GRID_Y_STEP * mv_zoom_y)) - mv_y_steps * GRID_Y_STEP / 10;   /* v54: Y move (0 = v53) */
+        int y = CENTER_Y - (int)(v / volts_per_div * (float)GRID_Y_STEP);
 
         /* Clamp to waveform area only (do not draw over header) */
         if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
         if (y >= SCREEN_H)    y = SCREEN_H - 1;
         new_y[i] = (int16_t)y;
     }
-    /* v83: peak-detect band of this frame (v86: FAST and SLOW; not for a panned / zoomed frozen view, or the simulator) */
-    env_y_on = (uint8_t)(osc_env_on && !mv_view_on);
+    /* v83: peak-detect band of this frame (v86: FAST and SLOW) */
+    env_y_on = osc_env_on;
     if (env_y_on) {
         const float kc = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;   /* v84: same scale as osc_v */
         for (int i = 0; i < N_SAMPLES; i++) {
@@ -78,7 +57,7 @@ void MapToScreen(int trig_offset)
                 float v = ((float)(e ? osc_env_lo_ct[src] : osc_env_hi_ct[src]) - osc_offset_ct) * kc;
                 if (!osc_calib && v < 0.0f) v = 0.0f;   /* v90: DC band clipped at 0 V like the trace */
                 v -= dc_sh;                              /* v91: same shift as the trace */
-                int y = CENTER_Y - (int)(v / volts_per_div * (float)(GRID_Y_STEP * mv_zoom_y)) - mv_y_steps * GRID_Y_STEP / 10;
+                int y = CENTER_Y - (int)(v / volts_per_div * (float)GRID_Y_STEP);
                 if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
                 if (y >= SCREEN_H)    y = SCREEN_H - 1;
                 if (e) env_y_hi[i] = (int16_t)y; else env_y_lo[i] = (int16_t)y;
@@ -391,9 +370,7 @@ void CursorsMoveFast(void)
     osc_cur_dirty = 0;
 }
 
-#if ADC_INPUT_ENABLE
 extern volatile uint16_t dbg_adc_min, dbg_adc_max;
-#endif
 /* ---- header text with a character cache: draw only what changed ------------------------------------------------------- */
 #define HDR_FIELDS 32
 static char     hdr_txt[HDR_FIELDS][24];
@@ -437,11 +414,11 @@ void DrawTopPanel(void)
     int sel_tdiv = (strcmp(selname, "T/DIV") == 0);
 
     /* V/div — x=2 (MAGENTA = กำลังปรับตัวนี้อยู่), always 4 decimals */
-    MvFmtV(buf, sizeof(buf), (hold_active && mv_zoom_y > 1) ? volts_per_div / (float)mv_zoom_y : volts_per_div);
+    MvFmtV(buf, sizeof(buf), volts_per_div);
     HDRT(buf, 2, 1, sel_vdiv ? (blink_on ? MAGENTA : YELLOW) : YELLOW, 1, BLACK);
 
     /* T/div label — x=72, always 4 decimals */
-    MvFmtT(buf, sizeof(buf), (hold_active && mv_zoom_x > 1) ? osc_capture_tdiv / (float)mv_zoom_x : osc_capture_tdiv);
+    MvFmtT(buf, sizeof(buf), osc_capture_tdiv);
     HDRT(buf, 72, 1, sel_tdiv ? (blink_on ? MAGENTA : WHITE) : WHITE, 1, BLACK);
 
     /* Setting ที่กำลังปรับ (SET เลือก, UP/DOWN เปลี่ยนค่า) — x=150
@@ -477,14 +454,10 @@ void DrawTopPanel(void)
         snprintf(buf, sizeof(buf), "dV=%.2fV", (double)(OscCursorV(osc_c2) - OscCursorV(osc_c1)));
         HDRT(buf, 148, 10, YELLOW, 1, BLACK);
         snprintf(buf, sizeof(buf), "dt=%.2fms",
-                 (double)(OscCursorDtS() * 1000.0f));   /* v57: cursor distance in time shrinks with the zoom; v85: pixel cursors */
+                 (double)(OscCursorDtS() * 1000.0f));   /* v85: pixel cursors */
         HDRT(buf, 2, 20, YELLOW, 1, BLACK);
-        snprintf(buf, sizeof(buf), "MOVE:%c", mv_axis_x ? 'X' : 'Y');                  /* v54: frozen only */
-        HDRT(buf, 72, 20, ORANGE, 1, BLACK);
         snprintf(buf, sizeof(buf), "%s%s ", slow_active ? "SLOW" : "FAST", osc_auto_tb ? "" : "*");   /* * = forced */
         HDRT(buf, 148, 20, osc_auto_tb ? GREEN : ORANGE, 1, BLACK);
-        MvFmtZ(buf, sizeof(buf));                                                        /* v57 */
-        HDRT(buf, 196, 20, CYAN, 1, BLACK);
     } else {
     snprintf(buf, sizeof(buf), "Vp:%.2fV", (double)tm.vpp);
     HDRT(buf, 2, 10, CYAN, 1, BLACK);
@@ -523,11 +496,9 @@ void DrawTopPanel(void)
         snprintf(buf, sizeof(buf), "ROLL");
     HDRT(buf, 148, 20, CYAN, 1, BLACK);
     HDRT(osc_auto_tb ? "AUT  " : (slow_active ? "SLOW*" : "FAST*"), 232, 20, osc_auto_tb ? GREEN : ORANGE, 1, BLACK);   /* time base: automatic / forced (F key, PC13, T/DIV) */
-#if ADC_INPUT_ENABLE
     /* CLIP: ADC ชน 0 หรือ 4095 => สัญญาณเกินช่วง 0-3.3 V (ยอดคลื่นแบนจริง ไม่ใช่บั๊กจอ) */
     HDRT((osc_frame_valid && (dbg_adc_min <= 8u || dbg_adc_max >= 4087u)) ? "CLIP" : "    ",
                       200, 20, RED, 1, BLACK);
-#endif
     }
 
 //    /* RMS — x=245 (245 < 255, safe for uint8_t) */

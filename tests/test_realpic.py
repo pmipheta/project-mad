@@ -1,5 +1,5 @@
 """v56 'real oscilloscope picture' host test.
-Re-uses the harness of test_buttons.py (real C of the AUTO_TB / MOVE blocks, OscAutoScale, OscAdjust from Core/Src/main.c, with the
+Re-uses the harness of test_buttons.py (real C of the AUTO_TB / ACTIONS blocks, OscAutoScale, OscAdjust from Core/Src/main.c, with the
 MODELLED measurement chain: FAST reads >= 39.9 Hz, SLOW reads any base with >= 3.1 cycles) and replaces its main().
 Source contracts on main.c itself (boot state, osc_stable default, Slow block, unchanged measurement code) are checked too.
 Not a board test."""
@@ -10,11 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_realpic'; OUT.mkdir(parents=True, exist_ok=True)
 tb = (ROOT/'tests/test_buttons.py').read_text()
 
-# --- take the preamble + harness of test_buttons.py, drop its contracts / UART part / main ---
+# --- take the preamble + harness of test_buttons.py, drop its contracts / main ---
 i_main = tb.index("int main(void){\n  char nm[200];")
 pre = tb[:i_main]
 tail_start = tb.index("'''\nharness = harness.replace('@@FILL@@'")
-tail_end = tb.index("# ---- UartCommand compiled for real")
+tail_end = tb.index("r1 = subprocess.run([str(OUT/'buttons')]")
 tail = tb[tail_start:tail_end]
 main_c = r'''int main(void){
   char nm[200];
@@ -118,7 +118,7 @@ contracts = [
  ('(a) boot: osc_auto_tb = 0', has(r'static uint8_t\s+osc_auto_tb\s*=\s*0;')),
  ('(a) boot: T/DIV index = 1 ms/div (OSC_TDIV_DEF 8), V/DIV index OSC_VDIV_DEF (12) = 1 V', has(r'#define OSC_TDIV_DEF\s+8\b') and has(r'osc_tdiv_i\s*=\s*OSC_TDIV_DEF') and has(r'osc_vdiv_i\s*=\s*OSC_VDIV_DEF;') and has(r'#define OSC_VDIV_DEF\s+12\b') and 'static const float osc_tdivs_ms[] = {0.005f,0.01f,0.015f,0.02f,0.05f,0.1f,0.2f,0.5f,1.0f' in src.replace(' ,', ',') or has(r'osc_tdivs_ms\[\][^;]*0\.5f,\s*1\.0f')),
  ('(f) default picture: osc_stable = 1 (trigger-locked)', has(r'static uint8_t\s+osc_stable\s*=\s*1;')),
- ("(f) UART 'm' still toggles roll/stable", 'osc_stable = (uint8_t)!osc_stable;' in src and 'osc_stable = 0;' in src and 'osc_stable = 1;' in src),
+ ("(f) PC3 short (ActToggleStable) still toggles roll/stable", 'osc_stable = (uint8_t)!osc_stable;' in src),
  ("only OscAutoRearm ('A') sets osc_auto_tb = 1", len(set_sites()) == 1 and 'static void OscAutoRearm(void)' in src[src.rfind('static void', 0, set_sites()[0]):set_sites()[0]+40]),
  ("'z' path (OscAutoScale) does not touch osc_auto_tb", 'osc_auto_tb' not in src[src.index('static void OscAutoScale(void)'):src.index('static float SlowProbeFreq')].replace('/* v56: one-shot. \'z\' does not touch osc_auto_tb (continuous auto time base only via \'A\') */','')),
  ('Slow block byte-identical to main_before.c (v56) [skipped without builds/ archive]', bt is None or slow_text(src) == slow_text(bt)),
@@ -134,7 +134,7 @@ if bt is not None:
             a_ = re.sub(r'\s+', ' ', a_.replace('OSC_VDIV_DEF', '3')); b_ = re.sub(r'\s+', ' ', b_)
         contracts.append(('function unchanged vs v56: '+name, a_ == b_))
     diff = [l for l in difflib.unified_diff(bt.splitlines(), src.splitlines(), lineterm='', n=0) if l[:1] in '+-' and l[:3] not in ('+++', '---')]
-    contracts.append(('whole-file diff vs v56 is small (<= 400 changed lines incl. RTOS v65-v71, V/DIV range v73, edge filter v74/v76, grid v75; the tight v57 contract is in test_zoom): %d' % len(diff), len(diff) <= 400))
+    contracts.append(('whole-file diff vs v56 is small (<= 400 changed lines incl. RTOS v65-v71, V/DIV range v73, edge filter v74/v76, grid v75): %d' % len(diff), len(diff) <= 400))
 cfail = sum(not ok for _, ok in contracts)
 for n, ok in contracts: print(('PASS ' if ok else 'FAIL ') + n)
 print('contract failures=%d' % cfail)

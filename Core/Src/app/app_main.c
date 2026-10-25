@@ -1,12 +1,10 @@
 /* app_main.c - Application start-up: called from main() after the CubeMX peripheral init. */
 #include "app/app.h"
 
-/* Everything main() does after the CubeMX peripheral init: ADC input, buttons, UART console, LCD. */
+/* Everything main() does after the CubeMX peripheral init: ADC input, buttons, LCD. */
 void AppInit(void)
 {
-#if ADC_INPUT_ENABLE
     AdcInputInit();   /* p30: ADC1+PA0+DMA สำหรับอินพุตจริง */
-#endif
 
 
     /* ปุ่ม PB0..PB3 = input + pull-up
@@ -37,9 +35,6 @@ void AppInit(void)
     btn_trig = (Button){BTN_TRIG_PORT, BTN_TRIG_PIN, 0, 0, 0, 0};
 
     /* LCD init */
-    UartInputInit();          /* เริ่มรับคำสั่งจาก USART3 (Virtual COM) */
-    /* v66b: UartPanel() moved to the start of OscTask (it reads osc_meas under the mutex; no Take before the scheduler) */
-
     ILI9341_Init();
     ILI9341_Set_Rotation(SCREEN_HORIZONTAL_1);
     ILI9341_Fill_Screen(BLACK);

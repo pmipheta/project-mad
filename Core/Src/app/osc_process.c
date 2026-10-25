@@ -5,7 +5,7 @@
  * ค่าโวลต์หลัง calibrate (AC coupling) + moving average filter
  * ทำงานเหมือน calibrate_offset() + moving_average_filter() ของ simulator
  * -------------------------------------------------------------------------- */
-int OscExtPoint(int k, float *v);   /* v76: real display point k (<0 or >=N_SAMPLES) of THIS FAST frame; defined in MOVE_DATA */
+int OscExtPoint(int k, float *v);   /* v76: real display point k (<0 or >=N_SAMPLES) of THIS FAST frame; defined in ext_points.c */
 int SlowExtPoint(int k, float *v);  /* v80: the same for a SLOW frame; defined in SLOW */
 
 /* v82: display filter window actually used. The FILTER setting (osc_fwin) is a boxcar; at the measured frequency it keeps
@@ -30,7 +30,6 @@ void OscProcessFrame(void)
 {
     const float k  = ADC_VREF / (float)ADC_FULL;                  /* pin volts (DC readout) */
     const float kg = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN; /* v84: input volts (trace) */
-    float       s = 0.0f;
     int         win, half;
 
     /* osc_fs_eff belongs to the captured frame, including HOLD redraws. */
@@ -38,8 +37,6 @@ void OscProcessFrame(void)
     /* Calibration (AC coupling): the offset is the mean over WHOLE cycles of the raw capture (a partial cycle biases a
      * window mean by up to ~13 % of the amplitude). No clean period -> mid-range (exact for symmetric waves). */
     if (osc_calib) {
-#if ADC_INPUT_ENABLE
-        (void)s;
         if (osc_raw_valid && osc_frame_valid) {
             osc_offset_ct = osc_raw_mean_ct;
         } else {
@@ -47,10 +44,6 @@ void OscProcessFrame(void)
             for (int i = 1; i < N_SAMPLES; i++) { if (raw_samples[i] < lo) lo = raw_samples[i]; if (raw_samples[i] > hi) hi = raw_samples[i]; }
             osc_offset_ct = ((float)lo + (float)hi) * 0.5f;
         }
-#else
-        for (int i = 0; i < N_SAMPLES; i++) s += (float)raw_samples[i];
-        osc_offset_ct = s / (float)N_SAMPLES;
-#endif
     } else {
         osc_offset_ct = ADC_DC_ZERO_CT;                 /* v89: DC: real 0 V on the centre line (was ADC_MID) */
     }
@@ -116,8 +109,7 @@ void OscProcessFrame(void)
 void OscMeasureFrame(void)
 {
     float vmin = 1e9f, vmax = -1e9f, s2 = 0.0f, prev = 0.0f, peak = 0.0f;
-    float cross[8];
-    int   ncross = 0;
+    int   ncross = 0;                              /* edges in the displayed window, 0..8 (OscFreqTrusted) */
 
     for (int i = 0; i < N_SAMPLES; i++) {          /* รอบ 1: min / max / RMS / peak */
         float v = osc_v[i];
@@ -142,8 +134,7 @@ void OscMeasureFrame(void)
             int up = (!osc_trig_fall && prev < 0.0f && v >= 0.0f);
             int dn = ( osc_trig_fall && prev >= 0.0f && v < 0.0f);
             if (armed && (up || dn)) {
-                float f = (v != prev) ? (-prev / (v - prev)) : 0.0f;
-                if (ncross < 8) cross[ncross++] = ((float)i - 1.0f + f) / osc_fs_eff;
+                if (ncross < 8) ncross++;
                 armed = 0;
             } else if (!armed) {
                 if (osc_trig_fall ? (v > hyst) : (v < -hyst)) armed = 1;
@@ -153,7 +144,6 @@ void OscMeasureFrame(void)
     }
     osc_disp_cross = ncross;
 
-#if ADC_INPUT_ENABLE
     {   /* Mx / Mn / Rs / Vp from the UNFILTERED data: the display smoothing filter and the averaging used to draw fast
          * signals must not shrink the numbers (a 5-point filter alone costs ~6 % at 1 kHz). */
         const float kv = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;   /* v84: input volts, same scale as the trace */
@@ -189,32 +179,19 @@ void OscMeasureFrame(void)
         if (!osc_calib) { if (vmin < 0.0f) vmin = 0.0f; if (vmax < 0.0f) vmax = 0.0f; }   /* v90: DC: Mn/Mx never below 0 V, like the trace */
         peak = (fabsf(vmax) > fabsf(vmin)) ? fabsf(vmax) : fabsf(vmin);
     }
-#endif
     OSC_LOCK();
     osc_meas.vmax = vmax;
     osc_meas.vmin = vmin;
     osc_meas.vpp  = vmax - vmin;
     osc_meas.vrms = sqrtf(s2 / (float)N_SAMPLES);
     osc_meas.dc_offset = osc_offset_v;              /* DC ก่อนทำ AC coupling */
-    osc_meas.freq = 0.0f;
-    if ((vmax - vmin) < 0.05f) {                    /* p43: สัญญาณเล็กเกิน (เช่นยังไม่ต่อสาย)
-                                                     * -> ไม่รายงานความถี่ (เดิมโชว์ค่า noise) */
-        osc_meas.freq = 0.0f;
-    } else if (ncross >= 2) {                       /* วัดคาบจากจุดตัดศูนย์ */
-        float span = cross[ncross - 1] - cross[0];
-        if (span > 0.0f) osc_meas.freq = (float)(ncross - 1) / span;
-    }
-
-#if ADC_INPUT_ENABLE
     osc_meas.freq = osc_frame_valid ? osc_raw_freq : 0.0f;
-#endif
     OSC_UNLOCK();
-#if ADC_INPUT_ENABLE
     /* v52: analog input bandwidth compensation.  The ADC input (source resistance + sample-and-hold capacitor) acts as
      * a one-pole low-pass at about ADC_INPUT_FC: measured on the board, 2.1 MHz read 0.87 V for a ~1.93 V signal.
      * The raw samples are already that small, so the software cannot "see" more; instead the DISPLAYED numbers are
      * scaled back by the known filter gain at the measured frequency.  Below ~100 kHz the factor is < 1.005 (no change);
-     * SLOW mode frequencies (< 100 Hz) give exactly 1.  Only osc_meas (screen/UART) is scaled - the raw values used by
+     * SLOW mode frequencies (< 100 Hz) give exactly 1.  Only osc_meas (screen) is scaled - the raw values used by
      * auto time base, hold and trigger logic are untouched. */
     OSC_LOCK();
     {
@@ -228,7 +205,6 @@ void OscMeasureFrame(void)
         peak *= g;
     }
     OSC_UNLOCK();
-#endif
     if (peak < 0.001f) {
         strcpy(osc_det, "---");
     } else {
