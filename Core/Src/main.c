@@ -2800,7 +2800,14 @@ static void FAST_O2 AdcCaptureFrame(void)
      * points fell back to one repeated value -> a flat block at a ripple extreme = the spike at the left edge. */
     uint32_t edge_m = (uint32_t)(10.0f * step + 0.5f) + w + 2u;
     uint8_t  edge_fit = ((float)edge_m + (float)N_SAMPLES * step + (float)w <= (float)n);
-    uint32_t t_from = edge_fit ? (edge_m + (uint32_t)(2.0f * step + 1.0f) + 1u) : 1u;   /* + lead (below) */
+    /* v79: refine boxcar half-width, capped to P/8 (at 10 kHz / 800 kSa/s the old H = step + 1 = 34 spanned ~0.9 period and flattened the edge) */
+    uint32_t trig_h = (uint32_t)(step * 1.0f) + 1u; if (trig_h > 64u) trig_h = 64u;
+    {   float fp = fast_meas ? adc_last_good_f : osc_raw_freq;
+        if (fp > 0.0f) { uint32_t hp = (uint32_t)(dbg_adc_rate / fp / 8.0f); if (hp < 1u) hp = 1u; if (trig_h > hp) trig_h = hp; }
+    }
+    /* v79: + lead + 3*trig_h, so refine (up to 3*trig_h back) and lead can never pull start below edge_m. The v78 value (edge_m + lead + 1)
+     * let the edge_m clamp below fire on every frame: start stuck at edge_m = untriggered, the trace drifted with the capture phase. */
+    uint32_t t_from = edge_fit ? (edge_m + (uint32_t)(2.0f * step + 1.0f) + 3u * trig_h + 1u) : 1u;
     uint32_t start = 0;
     if (osc_stable && osc_lock_auto) {
         float sum = 0.0f, mid;
@@ -2826,17 +2833,19 @@ static void FAST_O2 AdcCaptureFrame(void)
                     float v = (float)adc_raw_buf[i];
                     if (v > mid + hy) armed = 1;
                     else if (armed && v < mid && i >= t_from) { start = i; break; }   /* v78: not inside the left margin */
+                    else if (armed && v < mid) armed = 0;   /* v79: crossed before t_from: wait for the next full edge, not the first sample past t_from */
                 }
             } else {
                 for (uint32_t i = 1; i < lim; i++) {
                     float v = (float)adc_raw_buf[i];
                     if (v < mid - hy) armed = 1;
                     else if (armed && v >= mid && i >= t_from) { start = i; break; }   /* v78 */
+                    else if (armed && v >= mid) armed = 0;   /* v79: same as above */
                 }
             }
         }
         if (start > 0u) {   /* refine: first crossing of the boxcar-smoothed signal near the raw edge (noise of +-100 counts moves a raw crossing by +-50 samples) */
-            uint32_t H = (uint32_t)(step * 1.0f) + 1u; if (H > 64u) H = 64u;
+            uint32_t H = trig_h;   /* v79: P/8 cap, see t_from */
             uint32_t j0 = (start > 3u * H + H + 1u) ? (start - 3u * H) : (H + 1u), j1 = start + 3u * H;
             if (j1 + H + 1u > n) j1 = n - H - 1u;
             float prev = -1.0f; uint8_t got = 0; uint32_t found = start;
