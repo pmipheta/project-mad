@@ -92,6 +92,7 @@ static volatile uint8_t slow_active, slow_fast_flag;
 static uint8_t adc_fast_content; static uint32_t adc_over_t;
 static float osc_raw_vpp, dbg_auto_fsel, osc_v[N_SAMPLES], osc_offset_ct = 2048.0f;
 static int16_t raw_samples[N_SAMPLES]; static int16_t new_y[N_SAMPLES]; static int osc_plot_offset;
+static uint16_t osc_env_lo_ct[N_SAMPLES], osc_env_hi_ct[N_SAMPLES]; static uint8_t osc_env_on; static int16_t env_y_lo[N_SAMPLES], env_y_hi[N_SAMPLES]; static uint8_t env_y_on; static float osc_env_mean_ct, osc_env_rms_ct;   /* v83 peak detect */
 static uint16_t adc_raw_buf[ADC_RAW_MAX];
 static volatile uint16_t slow_hist[SLOW_HIST_N]; static volatile uint32_t slow_last_t, slow_valid_cnt, slow_period_us = 2083;
 static uint32_t now_ms; static uint32_t HAL_GetTick(void){return now_ms;}

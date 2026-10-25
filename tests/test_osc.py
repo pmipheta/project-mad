@@ -46,6 +46,7 @@ static int OscExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v76:
 #define SCREEN_H 240
 static float volts_per_div=1;
 static int16_t new_y[240];
+static uint16_t osc_env_lo_ct[240], osc_env_hi_ct[240]; static uint8_t osc_env_on; static int16_t env_y_lo[240], env_y_hi[240]; static uint8_t env_y_on; static float osc_env_mean_ct, osc_env_rms_ct;   /* v83 peak detect */
 static int osc_plot_offset;
 static const float osc_tdivs_ms[]={.005f,.01f,.015f,.02f,.05f,.1f,.2f,.5f,1,2,5,6,10,20,50,100,200,500};
 static volatile uint32_t dbg_adc_pre;

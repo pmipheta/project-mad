@@ -197,6 +197,13 @@ static void OscMeasGet(OscMeasure *o)
 /* --- Display double-buffer ------------------------------------------------- */
 static int16_t old_y[N_SAMPLES];
 static int16_t new_y[N_SAMPLES];
+/* v83 PEAK DETECT: min / max (ADC counts) of the raw samples behind each display point, valid when osc_env_on (FAST frame whose signal has
+ * < 8 display points per period). MapToScreen turns them into env_y_*, TraceColumns paints the band between them. */
+static uint16_t osc_env_lo_ct[N_SAMPLES], osc_env_hi_ct[N_SAMPLES];
+static uint8_t  osc_env_on = 0;
+static float    osc_env_mean_ct = 0.0f, osc_env_rms_ct = 0.0f;   /* mean / AC rms of the raw samples behind the window (readout fallback) */
+static int16_t  env_y_lo[N_SAMPLES], env_y_hi[N_SAMPLES];   /* screen y of the max (top) and the min (bottom) */
+static uint8_t  env_y_on = 0;
 
 /* --- Display state --------------------------------------------------------- */
 static float volts_per_div = 1.0f;
@@ -604,6 +611,15 @@ static void OscMeasureFrame(void)
             vmax = (osc_raw_max_ct - osc_raw_mean_ct) * kv;
             vmin = (osc_raw_min_ct - osc_raw_mean_ct) * kv;
             s2   = osc_raw_rms_ct * kv;  s2 = s2 * s2 * (float)N_SAMPLES;
+        } else if (osc_env_on && !slow_active && osc_frame_valid) {   /* v83: no clean period, peak-detect frame: the band (the drawn points are only the mean) */
+            float hi = 0.0f, lo = 1e9f;
+            for (int i = 0; i < N_SAMPLES; i++) {
+                if ((float)osc_env_hi_ct[i] > hi) hi = (float)osc_env_hi_ct[i];
+                if ((float)osc_env_lo_ct[i] < lo) lo = (float)osc_env_lo_ct[i];
+            }
+            vmax = (hi - osc_env_mean_ct) * kv;
+            vmin = (lo - osc_env_mean_ct) * kv;
+            s2   = osc_env_rms_ct * kv;  s2 = s2 * s2 * (float)N_SAMPLES;
         } else {                                            /* no clean period: whole unfiltered window */
             vmax = -1e9f; vmin = 1e9f; s2 = 0.0f;
             for (int i = 0; i < N_SAMPLES; i++) {
@@ -1651,6 +1667,22 @@ static void MapToScreen(int trig_offset)
         if (y >= SCREEN_H)    y = SCREEN_H - 1;
         new_y[i] = (int16_t)y;
     }
+    /* v83: peak-detect band of this FAST frame (not for SLOW, a panned / zoomed frozen view, or the simulator) */
+    env_y_on = (uint8_t)(osc_env_on && !slow_active && !mv_view_on);
+    if (env_y_on) {
+        const float kc = ADC_VREF / (float)ADC_FULL;
+        for (int i = 0; i < N_SAMPLES; i++) {
+            int src = (trig_offset + i);
+            if (src >= N_SAMPLES) src -= N_SAMPLES;
+            for (int e = 0; e < 2; e++) {
+                float v = ((float)(e ? osc_env_lo_ct[src] : osc_env_hi_ct[src]) - osc_offset_ct) * kc;
+                int y = CENTER_Y - (int)(v / volts_per_div * (float)(GRID_Y_STEP * mv_zoom_y)) - mv_y_steps * GRID_Y_STEP / 10;
+                if (y < WAVEFORM_TOP) y = WAVEFORM_TOP;
+                if (y >= SCREEN_H)    y = SCREEN_H - 1;
+                if (e) env_y_hi[i] = (int16_t)y; else env_y_lo[i] = (int16_t)y;
+            }
+        }
+    }
 }
 
 /* --------------------------------------------------------------------------
@@ -1818,6 +1850,13 @@ static void TraceColumns(uint8_t *lo, uint8_t *hi)   /* y-run of the polyline ne
             int e2 = 2 * err;
             if (e2 >= dy) { err += dy; x0 += sx; }
             if (e2 <= dx) { err += dx; y0 += sy; }
+        }
+    }
+    if (env_y_on) {                                  /* v83 peak detect: every column also covers the min..max band of its display point */
+        for (int x = 0; x < SCREEN_W; x++) {
+            int i = (x * N_SAMPLES) / SCREEN_W;
+            if (env_y_lo[i] < lo[x]) lo[x] = (uint8_t)env_y_lo[i];
+            if (env_y_hi[i] > hi[x]) hi[x] = (uint8_t)env_y_hi[i];
         }
     }
 }
@@ -2937,6 +2976,51 @@ static void FAST_O2 AdcCaptureFrame(void)
         if (v > vmax) vmax = v;
     }
     dec = wa;                        /* v81: dbg_adc_decim = samples actually averaged per point */
+    /* v83 PEAK DETECT: with < 8 display points per period no line through the averaged points can show the wave: at 5 ms/div a 2 kHz signal
+     * (2.4 points per period) drew ~25 % too small, at 6 ms/div (v81) a flat line at the mean. A real scope draws, per column, the min..max
+     * of the samples behind it = a band of the full height. Each point keeps the min / max of its own interval [c - step/2, c + step/2)
+     * (the intervals tile the capture), on a boxcar of k = 1/32 period so ADC noise does not make the band taller than the signal. */
+    osc_env_on = 0;
+    {   float fp = fast_meas ? adc_last_good_f : osc_raw_freq;
+        if (fp > 0.0f && dbg_adc_rate / fp < 8.0f * step) {
+            uint32_t k = (uint32_t)(dbg_adc_rate / fp / 16.0f);   /* 1/16 period: keeps > 99.3 % of a sine peak; 1/32 left the band ~4 % too tall at 444 kSa/s */
+            if (k < 1u) k = 1u;
+            if (k > 64u) k = 64u;
+            if (n > 2u * k + 2u) {
+                {   /* mean / AC rms of the samples behind the window: the readout when this frame has no clean period (the drawn points are the mean, v81) */
+                    uint32_t q0 = start, q1 = start + (uint32_t)((float)N_SAMPLES * step);
+                    float sm = 0.0f, sq = 0.0f, mu;
+                    if (q1 > n) q1 = n;
+                    if (q1 <= q0) q1 = q0 + 1u;
+                    for (uint32_t q = q0; q < q1; q++) sm += (float)adc_raw_buf[q];
+                    mu = sm / (float)(q1 - q0);
+                    for (uint32_t q = q0; q < q1; q++) { float dq = (float)adc_raw_buf[q] - mu; sq += dq * dq; }
+                    osc_env_mean_ct = mu; osc_env_rms_ct = sqrtf(sq / (float)(q1 - q0));
+                }
+                for (int i = 0; i < N_SAMPLES; i++) {
+                    int32_t c = (int32_t)start + (int32_t)((float)i * step + 0.5f);
+                    int32_t a = c - (int32_t)(step * 0.5f) - (int32_t)(k / 2u);   /* first boxcar start */
+                    int32_t b = c + (int32_t)(step * 0.5f + 0.5f) - (int32_t)(k / 2u);   /* last boxcar start (exclusive) */
+                    if (b <= a) b = a + 1;
+                    if (a < 0) a = 0;
+                    if (b > (int32_t)(n - k)) b = (int32_t)(n - k);
+                    if (b <= a) a = b - 1;
+                    if (a < 0) a = 0;
+                    uint32_t run = 0, lo = 0xFFFFFFFFu, hi = 0;
+                    for (uint32_t q = 0; q < k; q++) run += adc_raw_buf[(uint32_t)a + q];
+                    for (int32_t s = a; ; s++) {
+                        if (run < lo) lo = run;
+                        if (run > hi) hi = run;
+                        if (s + 1 >= b) break;
+                        run += adc_raw_buf[(uint32_t)s + k]; run -= adc_raw_buf[(uint32_t)s];
+                    }
+                    osc_env_lo_ct[i] = (uint16_t)(lo / k);
+                    osc_env_hi_ct[i] = (uint16_t)(hi / k);
+                }
+                osc_env_on = 1;
+            }
+        }
+    }
     MvStoreExt(start, step, wa, n);  /* v54: keep the display points just outside the window, for X move while frozen (v81: same averaging as the window) */
 
     /* แกนเวลา: อัตราสุ่มจริงหลัง resample (ไม่ใช้ค่าที่ตั้งไว้) */
