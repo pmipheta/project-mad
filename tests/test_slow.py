@@ -19,6 +19,7 @@ harness = r'''
 #define N_SAMPLES 240
 #define OSC_H_DIVS 10
 #define ADC_VREF 3.3f
+#define ADC_INPUT_GAIN 1.0f   /* v84: harness signals are pin volts */
 #define ADC_FULL 4095
 typedef struct {float vmax,vmin,vpp,vrms,dc_offset,freq;} OscMeasure;
 static OscMeasure osc_meas; static char osc_det[8];

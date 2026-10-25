@@ -110,7 +110,9 @@
 #define ADC_VREF        3.3f         /* reference voltage (V)                   */
 #define ADC_INPUT_FC    0.60e6f      /* v53: input roll-off corner (Hz); fit to 1-2.17 MHz board readings vs 1 kHz (+-3 %) */
 #define ADC_INPUT_N     1.7f         /* v53: roll-off steepness (1.0 would be a plain RC)                              */
-#define ADC_INPUT_GAIN  1.0f         /* v55: no low-frequency gain error (1.00 Vpp set -> raw 1.00 V); v53 value 1.111 was wrong */
+#define ADC_INPUT_GAIN  1.25f        /* v84: input volts per ADC-pin volt. Board: 1.00 Vpp set -> 0.80 V at PA0, 3.00 V -> 2.40 V (front-end divider).
+                                      * Applied wherever volts are drawn or shown (trace, band, readout, AUTO V/DIV); the signal-detection
+                                      * thresholds (0.05 / 0.30 V) stay at the pin. */
 #define ADC_INPUT_GMAX  3.5f         /* never scale more than 3.5x (noise)      */
 
 /* --- Sample buffer --------------------------------------------------------- */
@@ -482,7 +484,8 @@ static int OscFiltWin(void)
 
 static void OscProcessFrame(void)
 {
-    const float k = ADC_VREF / (float)ADC_FULL;
+    const float k  = ADC_VREF / (float)ADC_FULL;                  /* pin volts (DC readout) */
+    const float kg = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN; /* v84: input volts (trace) */
     float       s = 0.0f;
     int         win, half;
 
@@ -515,7 +518,7 @@ static void OscProcessFrame(void)
 
     for (int i = 0; i < N_SAMPLES; i++) {
         if (win <= 1) {
-            osc_v[i] = ((float)raw_samples[i] - osc_offset_ct) * k;
+            osc_v[i] = ((float)raw_samples[i] - osc_offset_ct) * kg;
         }
     }
     if (win > 1) {
@@ -525,7 +528,7 @@ static void OscProcessFrame(void)
             float acc = 0.0f;
             for (int j = -half; j <= half; j++) acc += (float)raw_samples[i + j];
             acc /= (float)win;
-            osc_v[i] = (acc - osc_offset_ct) * k;
+            osc_v[i] = (acc - osc_offset_ct) * kg;
             if (acc < flo) flo = acc;
             if (acc > fhi) fhi = acc;
             if (raw_samples[i] < rlo) rlo = (float)raw_samples[i];
@@ -606,7 +609,7 @@ static void OscMeasureFrame(void)
 #if ADC_INPUT_ENABLE
     {   /* Mx / Mn / Rs / Vp from the UNFILTERED data: the display smoothing filter and the averaging used to draw fast
          * signals must not shrink the numbers (a 5-point filter alone costs ~6 % at 1 kHz). */
-        const float kv = ADC_VREF / (float)ADC_FULL;
+        const float kv = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;   /* v84: input volts, same scale as the trace */
         if (osc_raw_valid && osc_frame_valid) {            /* whole cycles of the raw capture */
             vmax = (osc_raw_max_ct - osc_raw_mean_ct) * kv;
             vmin = (osc_raw_min_ct - osc_raw_mean_ct) * kv;
@@ -666,7 +669,6 @@ static void OscMeasureFrame(void)
             g = sqrtf(1.0f + expf(ADC_INPUT_N * logf(r)));
             if (g > ADC_INPUT_GMAX) g = ADC_INPUT_GMAX;
         }
-        g *= ADC_INPUT_GAIN;                         /* front-end gain applies at every frequency */
         osc_meas.vmax *= g; osc_meas.vmin *= g; osc_meas.vpp *= g; osc_meas.vrms *= g;
         peak *= g;
     }
@@ -1278,7 +1280,7 @@ static void OscAutoScaleStep(void)
 {
     if (!osc_auto_stage || hold_active || !osc_frame_valid || !new_frame_ready) return;
     float f = osc_meas.freq;
-    float vpp = ADC_INPUT_ENABLE ? osc_raw_vpp : osc_meas.vpp;
+    float vpp = ADC_INPUT_ENABLE ? osc_raw_vpp * ADC_INPUT_GAIN : osc_meas.vpp;   /* v84: input volts, like the trace */
     if (f > 0.0f) {
         dbg_auto_fsel = f;
         OscAutoApply(vpp, OscAutoPickTdiv(f));
@@ -1670,7 +1672,7 @@ static void MapToScreen(int trig_offset)
     /* v83: peak-detect band of this FAST frame (not for SLOW, a panned / zoomed frozen view, or the simulator) */
     env_y_on = (uint8_t)(osc_env_on && !slow_active && !mv_view_on);
     if (env_y_on) {
-        const float kc = ADC_VREF / (float)ADC_FULL;
+        const float kc = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;   /* v84: same scale as osc_v */
         for (int i = 0; i < N_SAMPLES; i++) {
             int src = (trig_offset + i);
             if (src >= N_SAMPLES) src -= N_SAMPLES;
@@ -3662,7 +3664,7 @@ static float MvZoomCount(int32_t U)
 static void MvBuildZoom(void)
 {
     float cnt[N_SAMPLES];
-    const float kv = ADC_VREF / (float)ADC_FULL;
+    const float kv = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;   /* v84 */
     int win = OscFiltWin(), half, zw;   /* v82: same window as OscProcessFrame */
     zw = win / mv_zoom_x; if (zw < 1) zw = 1; if ((zw % 2) == 0) zw++;
     half = zw / 2;
@@ -3679,7 +3681,7 @@ static void MvBuildView(void)                /* mv_view_v[] = the frozen capture
 {
     float cnt[N_SAMPLES];
     if (mv_zoom_x > 1) { MvBuildZoom(); return; }       /* v57 */
-    const float kv = ADC_VREF / (float)ADC_FULL;
+    const float kv = ADC_VREF / (float)ADC_FULL * ADC_INPUT_GAIN;   /* v84 */
     int win = OscFiltWin(), half;       /* v82: same window as OscProcessFrame */
     half = win / 2;
     for (int i = 0; i < N_SAMPLES; i++) {
