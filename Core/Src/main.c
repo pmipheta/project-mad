@@ -2136,7 +2136,7 @@ static void DrawTopPanel(void)
 
     /* โหมด trigger — AUTO:R / AUTO:F = จัดแนวให้นิ่ง, ROLL = ไถล */
     if (slow_active)                                         /* v86: SLOW shows its real state too: locked to an edge or scrolling */
-        snprintf(buf, sizeof(buf), slow_trig_on ? (osc_trig_fall ? "AUTO:F" : "AUTO:R") : "ROLL  ");
+        snprintf(buf, sizeof(buf), !osc_stable ? "ROLL  " : (slow_trig_on ? (osc_trig_fall ? "AUTO:F" : "AUTO:R") : "AUTO  "));   /* v87: AUTO with no edge yet = "AUTO" */
     else if (osc_stable && osc_lock_auto)
         snprintf(buf, sizeof(buf), "AUTO:%s", osc_trig_fall ? "F" : "R");
     else
@@ -3357,7 +3357,7 @@ static int SlowExtPoint(int k, float *v)                      /* v80: display fi
 
 /* TRIGGERED VIEW for 10..50 ms/div (windows of 0.1-0.5 s): lock the picture to the most recent rising (or falling) edge of the history,
  * with the edge 10 % from the left, like a scope. The picture then stands still instead of scrolling, and a change of frequency
- * or amplitude shows up within one period. Longer windows (>= 100 ms/div) keep scrolling (roll mode).
+ * or amplitude shows up within one period. v87: every SLOW T/DIV in AUTO (the 8 s history covers 1.5 windows even at 500 ms/div); ROLL scrolls.
  * Returns 1 and the view end (tick, sub-tick offset) when a clean edge exists, 0 = free-run (no signal / no edge). */
 static volatile uint8_t dbg_slow_trig = 0;
 static float slow_pv_cur = 0.0f; static uint32_t slow_pv_t = 0u;   /* drawn time base (us per point) and the tick of its last update */
@@ -3367,7 +3367,7 @@ static uint8_t SlowFindTrigger(uint32_t period_us, uint32_t *t_view, uint32_t *b
     uint32_t last = slow_last_t;
     uint32_t pre  = w_ms / 10u;                                                      /* edge sits 10 % from the left */
     uint32_t reach = w_ms + w_ms / 2u;                                               /* look back 1.5 windows */
-    if (!(osc_stable && osc_lock_auto) || w_ms > 500u || slow_valid_cnt < reach + 8u) return 0;
+    if (!osc_stable || slow_valid_cnt < reach + 8u) return 0;   /* v87: AUTO locks at every SLOW T/DIV and frequency (was >= 45 Hz and <= 50 ms/div only, so ROLL/AUTO did nothing at 30 Hz); ROLL never */
     uint32_t newest_ok = last - (w_ms - pre) - 1u;                                   /* view must end before the newest tick */
     uint32_t s0 = last - reach;
     uint16_t mn = 0xFFFF, mx = 0;

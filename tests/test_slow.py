@@ -169,8 +169,19 @@ int main(void){
   /* lock switched off: free-run even at 20 ms/div */
   { osc_stable=0; AMP=0.9; F_HZ=30.0; osc_tdiv_i=T20; run(3.0); SlowSync(); SlowCaptureFrame(); int ok=(dbg_slow_trig==0); printf("%s lock off: 30 Hz @20 ms/div free-runs\n", ok?"PASS":"FAIL"); if(!ok) failures++; osc_stable=1; AMP=0.3; }
   /* --- roll mode (>= 100 ms/div) and no-signal stay free-running --- */
-  { AMP=0.3; F_HZ=1.0; osc_tdiv_i=T500; run(8.0); SlowSync(); SlowCaptureFrame(); int ok=(dbg_slow_trig==0); printf("%s 1 Hz @500 ms/div stays in roll mode (no trigger)\n", ok?"PASS":"FAIL"); if(!ok) failures++;
-    ok = (slow_trig_on==0); printf("%s v86 header: that frame shows ROLL\n", ok?"PASS":"FAIL"); if(!ok) failures++; }
+  /* v87: SLOW AUTO locks at every T/DIV (was >= 45 Hz and <= 50 ms/div only, so the ROLL/AUTO toggle did nothing at 30 Hz); ROLL scrolls */
+  { AMP=0.3; F_HZ=1.0; osc_tdiv_i=T500; osc_stable=0; run(8.0); SlowSync(); SlowCaptureFrame(); int ok=(dbg_slow_trig==0 && slow_trig_on==0); printf("%s v87 ROLL: 1 Hz @500 ms/div scrolls (header ROLL)\n", ok?"PASS":"FAIL"); if(!ok) failures++;
+    osc_stable=1; SlowSync(); SlowCaptureFrame(); ok=(dbg_slow_trig==1 && slow_trig_on==1); printf("%s v87 AUTO: 1 Hz @500 ms/div locks to the edge (header AUTO:R)\n", ok?"PASS":"FAIL"); if(!ok) failures++;
+    osc_lock_auto=0; SlowSync(); SlowCaptureFrame(); ok=(dbg_slow_trig==1); printf("%s v87 AUTO: locks without the FAST >= 45 Hz flag\n", ok?"PASS":"FAIL"); if(!ok) failures++; osc_lock_auto=1;
+    AMP=0.0; run(8.0); SlowSync(); SlowCaptureFrame(); ok=(dbg_slow_trig==0); printf("%s v87 AUTO: flat input has no edge -> free-runs\n", ok?"PASS":"FAIL"); if(!ok) failures++; AMP=0.3; }
+  { int tis[] = {T100, T200, T500}; osc_lock_auto=0;
+    for(int q=0;q<3;q++){ AMP=0.9; NOISE=0.04; F_HZ=30.0; osc_tdiv_i=tis[q]; run(8.0); int fr=0, ntrig=0, maxd=0; int16_t prev[N_SAMPLES]; int have=0;
+      for(int k=0;k<20;k++){ run(0.0113+0.0007*(k%5)); SlowSync(); SlowCaptureFrame(); if(!osc_frame_valid) continue; fr++; ntrig+=dbg_slow_trig;
+        if(have){ int d=0; for(int i=0;i<N_SAMPLES/4;i++){ int e=raw_samples[i]-prev[i]; if(e<0)e=-e; if(e>d)d=e; } if(d>maxd)maxd=d; }
+        memcpy(prev,(const void*)raw_samples,sizeof prev); have=1; }
+      int ok=(fr>15 && ntrig==fr);
+      printf("%s v87 AUTO 30 Hz @%3.0f ms/div: locked %d/%d frames, left quarter moves at most %d counts frame to frame\n", ok?"PASS":"FAIL", osc_tdivs_ms[tis[q]], ntrig, fr, maxd); if(!ok) failures++; }
+    NOISE=0.0; AMP=0.3; osc_lock_auto=1; }
   /* v86: < 8 points per period -> peak-detect band from the ticks behind each point; its height = the true swing at every SLOW T/DIV */
   { int tis[] = {T50, T100, T200, T500}; AMP=0.9; F_HZ=30.0; double true_ct = 2*AMP/3.3*4095;
     for (int k=0;k<4;k++){ osc_tdiv_i=tis[k]; run(6.0); SlowSync(); SlowCaptureFrame();
