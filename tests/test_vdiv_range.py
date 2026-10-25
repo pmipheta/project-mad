@@ -1,7 +1,8 @@
 """V/DIV selectable range contract: 100 uV/div through 2 V/div, 1-2-5 sequence."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 import re, pathlib, sys
 root=pathlib.Path(__file__).resolve().parents[1]
-s=(root/'Core/Src/main.c').read_text()
+s=app_source()
 fails=0
 def check(name, ok):
  global fails

@@ -1,11 +1,12 @@
 """Host test of the SLOW history sampler + SLOW display (T/DIV >= 50 ms) extracted from Core/Src/main.c.
 The ADC is modelled as an ideal 12-bit converter; SysTick is called once per simulated ms. Not a board test."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__import__('tempfile').gettempdir()) / 'osc_slow'
 OUT.mkdir(parents=True, exist_ok=True)
-src = (ROOT/'Core/Src/main.c').read_text()
+src = app_source()
 a, b = src.index('SLOW_BEGIN'), src.index('SLOW_END')
 block = src[src.rfind('/*', 0, a):src.index('\n', b)+1]
 (OUT/'slow_extract.c').write_text(block)
@@ -159,6 +160,17 @@ int main(void){
       int ok=(fr>50 && ntrig==fr && (hi-lo)<1.5);
       printf("%s triggered view %-18s edge position spread %.2f points over %d frames (limit 1.5), triggered %d/%d, measured %.3f Hz\n", ok?"PASS":"FAIL", cs[q].n, hi-lo, fr, ntrig, fr, osc_raw_freq); if(!ok) failures++; }
     NOISE=0.0; AMP=0.3; }
+  /* v96: the edge sits 2 display points from the left like FAST (was 10 % = point 24), the screen starts on the trigger slope */
+  for(int fall=0; fall<2; fall++){ struct { double f; int ti; const char *n; } cs[] = {{30.0,T20,"30 Hz @20 ms/div"},{32.0,T50,"32 Hz @50 ms/div"},{1.0,T500,"1 Hz @500 ms/div"}};
+    osc_trig_fall=fall;
+    for(int q=0;q<3;q++){ AMP=0.9; NOISE=0.04; F_HZ=cs[q].f; osc_tdiv_i=cs[q].ti; run(8.0); SlowSync(); SlowCaptureFrame();
+      int mn=4095,mx=0; for(int i=0;i<N_SAMPLES;i++){ if(raw_samples[i]<mn)mn=raw_samples[i]; if(raw_samples[i]>mx)mx=raw_samples[i]; }
+      double mid=0.5*(mn+mx), pos=-1; for(int i=1;i<N_SAMPLES;i++){ int a=raw_samples[i-1], b=raw_samples[i];
+        if(fall ? (a>=mid && b<mid) : (a<mid && b>=mid)){ pos=i-1+(mid-a)/(double)(b-a); break; } }
+      int first_ok = fall ? (raw_samples[0] > mid - 0.25*(mx-mn)) : (raw_samples[0] < mid + 0.25*(mx-mn));
+      int ok=(dbg_slow_trig==1 && pos>=1.0 && pos<=3.5 && first_ok);
+      printf("%s v96 %s edge %-18s first crossing at point %.2f (expect 1..3.5), triggered %d\n", ok?"PASS":"FAIL", fall?"FALL":"RISE", cs[q].n, pos, dbg_slow_trig); if(!ok) failures++; } }
+  osc_trig_fall=0; NOISE=0.0; AMP=0.3;
   /* 11 Hz -> 1 Hz on ONE time base (200 ms/div): the picture keeps scrolling, no empty screen, and the number follows within ~3 s */
   { AMP=0.9; F_HZ=11.0; osc_stable=0; osc_tdiv_i=T200; run(6.0); F_HZ=1.0; int ok=1, got=0; double t_read=-1; int minspan=99999;
     for(int k=0;k<60;k++){ run(0.1); if(!osc_frame_valid) ok=0;

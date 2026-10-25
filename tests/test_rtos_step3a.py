@@ -1,11 +1,14 @@
-"""(v66b) FreeRTOS refactor step 3a contracts: mutex around shared osc state, still ONE task. Pure text checks on main.c."""
+"""(v66b) FreeRTOS refactor step 3a contracts: mutex around shared osc state; (v95) the OscTask + InputTask split under the app lock.
+Pure text checks on the app source (app_src.py: modules + main() with AppInit/AppStart inlined)."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 import re, pathlib, sys
 import _unlock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-raw = (ROOT/'Core/Src/main.c').read_text(encoding='utf-8')
+raw = app_source()
 _bp = ROOT.parent/'builds/v66-rtos-step3a/main_before.c'   # local build archive (not in the git repo)
 bef = _bp.read_text(encoding='utf-8') if _bp.exists() else None
 it  = (ROOT/'Core/Src/stm32f7xx_it.c').read_text()
+amh = (ROOT/'Core/Inc/app/app_main.h').read_text()        # task stacks/priorities + the APP_LOCK macros
 fails = 0
 def chk(name, ok, extra=''):
     global fails
@@ -67,16 +70,16 @@ for fn_name in ('OscMeasureFrame', 'OscProcessFrame', 'AdcCaptureFrame', 'OscAut
 # (a) mutex creation
 mn = src[src.index('int main(void)'):]
 chk('(a) static SemaphoreHandle_t xOscMutex declared', re.search(r'^static SemaphoreHandle_t xOscMutex;', src, re.M) is not None)
-chk('(a) xOscMutex = xSemaphoreCreateMutex() in main()', 'xOscMutex = xSemaphoreCreateMutex();' in mn)
+chk('(a) xOscMutex = xSemaphoreCreateMutex() in main() (AppStart)', 'xOscMutex = xSemaphoreCreateMutex();' in mn)
 chk('(a) plain mutex (no recursive variant used anywhere)', 'Recursive' not in src)
-chk('(a) NULL check -> Error_Handler()', re.search(r'xOscMutex = xSemaphoreCreateMutex\(\);[^\n]*\n\s*if \(xOscMutex == NULL\) Error_Handler\(\);', mn) is not None)
+chk('(a) NULL check -> Error_Handler() (both mutexes)', re.search(r'xOscMutex = xSemaphoreCreateMutex\(\);[^\n]*\n\s*xAppLock  = xSemaphoreCreateMutex\(\);[^\n]*\n\s*if \(xOscMutex == NULL \|\| xAppLock == NULL\) Error_Handler\(\);', mn) is not None)
 ix = lambda s: mn.index(s)
-chk('(a) created before xTaskCreate', ix('xSemaphoreCreateMutex') < ix('xTaskCreate(vMainTask'))
+chk('(a) created before xTaskCreate', ix('xSemaphoreCreateMutex') < ix('xTaskCreate(OscTask'))
 chk('(a) created after all init that must remain single-threaded and immediately before xTaskCreate',
-    ix('xSemaphoreCreateMutex') < ix('xTaskCreate(vMainTask') and ix('xSemaphoreCreateMutex') > ix('HdrInvalidate();'))
+    ix('xSemaphoreCreateMutex') < ix('xTaskCreate(OscTask') and ix('xSemaphoreCreateMutex') > ix('HdrInvalidate();'))
 chk('(a) created after HAL_Init + SystemClock_Config (heap/clock ready)', ix('SystemClock_Config();') < ix('xSemaphoreCreateMutex'))
 chk('(a) semphr.h included', '#include "semphr.h"' in raw)
-chk('(a) xTaskCreate called exactly once (still one task)', src.count('xTaskCreate(') == 1)
+chk('(a) xTaskCreate called exactly twice (OscTask, InputTask)', src.count('xTaskCreate(') == 2)
 
 # (b) every write to a protected variable is locked
 slow_a, slow_b = raw.index('SLOW_BEGIN ='), raw.index('SLOW_END =')
@@ -161,7 +164,8 @@ chk('(c) a non-recursive mutex does not need to be recursive: SlowCaptureFrame c
     not any(re.search(r'\b%s\s*\(' % l, src[slow_a:slow_b]) for l in L) and not LOCKTOK.search(src[slow_a:slow_b]))
 
 # (d) ISR safety
-isr_roots = ['OscSlowTick', 'HAL_UART_RxCpltCallback', 'HAL_UART_ErrorCallback', 'USART3_IRQHandler', 'ADC_IRQHandler', 'DMA2_Stream0_IRQHandler']
+# ADC_IRQHandler / DMA2_Stream0_IRQHandler are CubeMX code (stm32f7xx_it.c) that only call HAL; HAL calls back into these from the ISR:
+isr_roots = ['OscSlowTick', 'HAL_UART_RxCpltCallback', 'HAL_UART_ErrorCallback', 'USART3_IRQHandler', 'HAL_ADC_ConvCpltCallback', 'HAL_ADC_ErrorCallback']
 seen, todo = set(), list(isr_roots)
 while todo:
     n = todo.pop()
@@ -177,24 +181,39 @@ chk('(d) OscSlowTick defined in the Slow block, has no semaphore text', 'OscSlow
 st = it[it.index('void SysTick_Handler(void)'):]; st = st[:st.index('\n}\n')]
 chk('(d) SysTick_Handler has no semaphore/mutex call', 'xSemaphore' not in st and 'OSC_' not in st and 'xOscMutex' not in st)
 chk('(d) no semaphore call anywhere in stm32f7xx_it.c', 'xSemaphore' not in it and 'xOscMutex' not in it)
-chk('(d) no FromISR variants and no semaphore use outside OSC_* macros', 'FromISR' not in src and len(re.findall(r'xSemaphore(?:Take|Give)', src)) == 2)
+chk('(d) no FromISR variants and no semaphore use outside the OSC_* / APP_* macros', 'FromISR' not in src + amh and len(re.findall(r'xSemaphore(?:Take|Give)', src + strip(amh))) == 4)
 
 # (e) Slow block untouched, unrelated checks
 sl = lambda t: t[t.index('SLOW_BEGIN ='):t.index('SLOW_END =')]
 if bef is not None: chk('(e) Slow block byte-identical to v65 (%d chars)' % len(sl(bef)), sl(raw) == sl(bef))
 else: print('SKIP (e) Slow block vs v65 (builds/ archive not present in this checkout)')
-chk('(e) vMainTask unchanged in structure: stack 2048 / prio idle+1 task create line identical', 'xTaskCreate(vMainTask, "Main", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);' in raw)
+chk('(e) OscTask keeps the old task: stack 2048 words / prio idle+1', '#define OSC_TASK_STACK    2048' in amh and '#define OSC_TASK_PRIO     (tskIDLE_PRIORITY + 1)' in amh
+    and 'xTaskCreate(OscTask,   "Osc",   OSC_TASK_STACK,   NULL, OSC_TASK_PRIO,   &osc_task_handle)' in raw)
 
 # (f) run
 vv = presched_violations(raw)
 chk('(f) ZERO mutex Take/Give/OSC_* tokens and ZERO calls to locking functions in main() before vTaskStartScheduler()', not vv, str(vv))
 mm = src[fn['main'][0]:fn['main'][1]]
-chk('(f) no mutex token anywhere in main() except the xSemaphoreCreateMutex creation (approach (a): ALL locking lives in vMainTask)',
-    not re.search(r'\b(OSC_LOCK|OSC_UNLOCK|OSC_SET|OscMeasGet|xSemaphoreTake|xSemaphoreGive)\b', mm))
+chk('(f) no mutex token anywhere in main() except the xSemaphoreCreateMutex creation (ALL locking lives in the tasks)',
+    not re.search(r'\b(OSC_LOCK|OSC_UNLOCK|OSC_SET|APP_LOCK|APP_UNLOCK|OscMeasGet|xSemaphoreTake|xSemaphoreGive)\b', mm))
 chk('(f) init remains before mutex creation and no lock-taking function is called after creation but before scheduler start',
     ix('HdrInvalidate();') < ix('xSemaphoreCreateMutex') and not presched_violations(raw))
-chk('(f) vMainTask owns the initial UI draw prologue after scheduler start',
-    all(k in body('vMainTask')[:body('vMainTask').index('for (;;)')] for k in ('UartPanel();', 'DrawGrid();', 'DrawCursor();', 'DrawTopPanel();')))
+chk('(f) OscTask owns the initial UI draw prologue after scheduler start',
+    all(k in body('OscTask')[:body('OscTask').index('for (;;)')] for k in ('UartPanel();', 'DrawGrid();', 'DrawCursor();', 'DrawTopPanel();')))
+
+# (g) v95 task split: InputTask = the old per-pass HandleButtons/UartPoll, under the app lock, between OscTask passes
+ot, itk = body('OscTask'), body('InputTask')
+loop = ot[ot.index('for (;;)'):]
+chk('(g) InputTask waits for the start-up screen, then polls under the app lock and wakes OscTask',
+    re.search(r'ulTaskNotifyTake\(pdTRUE, portMAX_DELAY\);.*for \(;;\)\s*\{\s*APP_LOCK\(\);\s*HandleButtons\(HAL_GetTick\(\)\);\s*UartPoll\(\);\s*APP_UNLOCK\(\);'
+              r'\s*xTaskNotifyGive\(osc_task_handle\);\s*vTaskDelay\(pdMS_TO_TICKS\(INPUT_POLL_MS\)\);\s*\}', itk, re.S) is not None)
+chk('(g) OscTask releases InputTask only after the start-up draw', ot.index('xTaskNotifyGive(input_task_handle);') > ot.index('DrawTopPanel();') and ot.index('xTaskNotifyGive(input_task_handle);') < ot.index('for (;;)'))
+chk('(g) HandleButtons / UartPoll are called only by InputTask', [n for n in fn if n != 'InputTask' and re.search(r'\b(HandleButtons|UartPoll)\s*\(', body(n))] == [])
+chk('(g) one OscTask pass = APP_LOCK() .. APP_UNLOCK(), then the deadline sleep (no lock held while sleeping)',
+    re.match(r'for \(;;\)\s*\{\s*APP_LOCK\(\);', loop) is not None and loop.count('APP_LOCK()') == 1 and loop.count('APP_UNLOCK()') == 1
+    and loop.index('APP_UNLOCK()') < loop.index('ulTaskNotifyTake(') and not re.search(r'\b(return|continue)\b', loop))
+chk('(g) InputTask outranks OscTask, 1 ms poll = HAL tick', '#define INPUT_TASK_PRIO   (tskIDLE_PRIORITY + 2)' in amh and '#define INPUT_POLL_MS     1 ' in amh)
+chk('(g) lock order: OSC_LOCK only inside a pass/poll, never around APP_LOCK', all(not re.search(r'OSC_LOCK\(\);[^}]*APP_LOCK\(\)', body(n)) for n in fn))
 broken = ROOT.parent/'builds/v66-rtos-step3a/main_broken.c'
 if broken.exists():
     bv = presched_violations(broken.read_text(encoding='utf-8'))

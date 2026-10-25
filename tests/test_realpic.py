@@ -3,6 +3,7 @@ Re-uses the harness of test_buttons.py (real C of the AUTO_TB / MOVE blocks, Osc
 MODELLED measurement chain: FAST reads >= 39.9 Hz, SLOW reads any base with >= 3.1 cycles) and replaces its main().
 Source contracts on main.c itself (boot state, osc_stable default, Slow block, unchanged measurement code) are checked too.
 Not a board test."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import re, subprocess, tempfile, difflib
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,7 +107,7 @@ exec(compile(harness_py, 'realpic_harness', 'exec'), ns)
 # ---- contracts on the text of main.c ------------------------------------------------------------------------------------
 from rtos_norm import unrtos
 from _unlock import unlock
-src = unrtos(unlock((ROOT/'Core/Src/main.c').read_text()))
+src = unrtos(unlock(app_source()))
 before = ROOT.parent/'builds/v57/main_before.c'
 def slow_text(t): return t[t.index('SLOW_BEGIN ='):t.index('SLOW_END =')]
 bt = before.read_text() if before.exists() else None

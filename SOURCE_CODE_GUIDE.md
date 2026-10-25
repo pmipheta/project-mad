@@ -28,18 +28,42 @@ sine of 1.65 V DC ± 1 V appears centred on the screen.
 
 | Path | What it is |
 |---|---|
-| `Core/Src/main.c` | **Almost all application code** (~3800 lines): acquisition, measurement, auto modes, display, buttons, UART, RTOS task |
-| `Core/Src/stm32f7xx_it.c` | Interrupt handlers. `SysTick_Handler` drives the HAL tick, the SLOW sampler and the FreeRTOS tick |
+| `Core/Src/app/*.c`, `Core/Inc/app/*.h` | **All application code**, one module per job (table below). Each `.c` includes `app/app.h` |
+| `Core/Src/main.c` | CubeMX-generated. Only USER CODE: `#include "app/app.h"`, then `AppInit(); AppStart();` after the `MX_*` init |
+| `Core/Src/adc.c`, `dma.c` | CubeMX-generated ADC1 (PA0 = IN0) + DMA2 Stream0 init, `hadc1`, `hdma_adc1`, `HAL_ADC_MspInit` |
+| `Core/Src/stm32f7xx_it.c` | Interrupt handlers (CubeMX). `SysTick_Handler` USER CODE drives the SLOW sampler and the FreeRTOS tick |
 | `Core/Src/freertos_hooks.c` | `vApplicationStackOverflowHook` (required by `configCHECK_FOR_STACK_OVERFLOW = 2`) |
 | `Core/Src/ILI9341/` | LCD driver (pixels, rectangles, text) |
 | `Core/Src/gpio.c, spi.c, usart.c, tim.c, i2c.c, rng.c` | CubeMX-generated peripheral init |
-| `Core/Inc/FreeRTOSConfig.h` | Kernel configuration (1 kHz tick, 15 KB heap, mutexes on) |
-| `Middlewares/FreeRTOS/` | FreeRTOS kernel, **vendored by hand** (not CubeMX) |
+| `Core/Inc/FreeRTOSConfig.h` | Kernel configuration (1 kHz tick, 24 KB heap, mutexes on). Hand-written, CubeMX does not touch it |
+| `ThirdParty/FreeRTOS/` | FreeRTOS V11.1.0 kernel, vendored by hand (outside `Middlewares/`, which CubeMX manages) |
 | `Drivers/` | ST HAL + CMSIS |
-| `tests/` | Host (PC) tests that extract real C from `main.c` and run it — see §10 |
+| `tests/` | Host (PC) tests that extract real C from the app modules and run it — see §10 |
 
-> **Do not regenerate code with CubeMX.** The 8 buttons and FreeRTOS were added by
-> hand in `main.c` / `Middlewares`; regeneration would delete them.
+| Module (`Core/Src/app/`) | Job |
+|---|---|
+| `app_config.h` (Inc only) | build switches, button pins, screen geometry, timing, shared types |
+| `osc_state` | shared settings, measurement results, display buffers, `xOscMutex` + `OSC_LOCK/OSC_SET` |
+| `adc_capture` | FAST capture: DMA bursts, rate levels, triple-ADC interleave, `AdcInputInit` (rate measurement) |
+| `slow_mode` | SLOW mode: 1 kHz ADC3 history sampler (`OscSlowTick`) and the SLOW frame |
+| `osc_process` | offset/AC-DC, display filter, measurements (Vmax/Vmin/Vpp/RMS/F) |
+| `osc_timebase` | frame hold and the automatic FAST/SLOW time base |
+| `osc_settings` | setting menu (FILTER/TRIG/V/DIV/T/DIV, cursors), AutoScale request |
+| `osc_actions` | user actions `Act*`, MOVE/ZOOM of a frozen capture, AutoScale steps |
+| `move_view` | data behind MOVE/ZOOM (points outside the window, raw copy, panned view) |
+| `display` | LCD drawing: trace, grid, columns, cursors, setting bar, header |
+| `buttons` | debounce, hold-repeat, long press, mapping to actions |
+| `uart_console` | USART3 RX ring, status panel, command parser |
+| `osc_sim` | signal simulator (only with `ADC_INPUT_ENABLE = 0`) |
+| `osc_task` | **OscTask**: capture → process → draw → header, sleeps between deadlines |
+| `input_task` | **InputTask**: buttons + UART every 1 ms |
+| `app_main` | `AppInit()` (buttons GPIO, UART, LCD) and `AppStart()` (mutexes, tasks, scheduler) |
+
+> **CubeMX Generate is safe.** Everything hand-written is either in `Core/Src/app`,
+> `ThirdParty/`, `FreeRTOSConfig.h`, `freertos_hooks.c` or inside `USER CODE` blocks.
+> ADC1/DMA live in `oscilloscope.ioc` with the exact settings the code needs; SVC/PendSV
+> handler generation is off (FreeRTOS's port provides them). Checked: Generate on the
+> committed tree changes no file, and the result builds.
 
 `Core/Src/main.c.bak*` files are old personal backups, not part of the build logic
 (the build compiles `*.c` only).
@@ -49,23 +73,30 @@ sine of 1.65 V DC ± 1 V appears centred on the screen.
 ## 3. Start-up and run-time structure
 
 ```
-main()
+main()  (CubeMX)
  ├─ HAL_Init, SystemClock_Config (96 MHz)
- ├─ MX_* peripheral init, AdcInputInit (ADC1 + PA0 + DMA)
- ├─ manual GPIO init of the 8 buttons, Button structs
- ├─ UartInputInit, ILI9341_Init, clear screen
- ├─ xOscMutex = xSemaphoreCreateMutex()      <- created LAST, right before the task
- ├─ xTaskCreate(vMainTask, 2048 words, prio idle+1)
- └─ vTaskStartScheduler()                     <- never returns
+ ├─ MX_GPIO/DMA/RNG/SPI5/TIM1/USART3/I2C1/ADC1_Init
+ ├─ AppInit():  AdcInputInit (DWT, rate measurement, triple ADC), 8 button GPIOs,
+ │              Button structs, UartInputInit, ILI9341_Init, clear screen
+ └─ AppStart(): xOscMutex + xAppLock, xTaskCreate(OscTask), xTaskCreate(InputTask),
+                vTaskStartScheduler()          <- never returns
 
-vMainTask  (the old bare-metal while(1), one task)
- ├─ once: UartPanel, DrawGrid, DrawCursor, DrawTopPanel
- └─ for (;;)
-     ├─ HandleButtons(now)          every pass
-     ├─ UartPoll()                  every pass
-     ├─ every FRAME_MS (33 ms):     capture → process → measure → auto → draw
-     └─ every HEADER_MS (300 ms):   DrawTopPanel (text header)
+InputTask  (prio idle+2, 2048 words)           OscTask  (prio idle+1, 2048 words)
+ ├─ wait until OscTask drew the start screen    ├─ once: UartPanel, DrawGrid, DrawCursor, DrawTopPanel
+ └─ every 1 ms:                                 └─ for (;;)
+     APP_LOCK                                       APP_LOCK
+     HandleButtons(now), UartPoll()                 abort stale capture, C1/C2 fast repaint
+     APP_UNLOCK                                     every FRAME_MS (33 ms): capture → process → measure → auto → draw
+     wake OscTask                                   every HEADER_MS (300 ms): DrawTopPanel
+                                                    APP_UNLOCK
+                                                    sleep until the next frame/header, or until InputTask wakes it
 ```
+
+The app lock makes the two tasks take turns exactly like the old single loop did
+(input between two passes, never in the middle of a frame), so the behaviour is the
+same; the difference is that nothing spins any more. Frozen (HOLD), OscTask sleeps
+~98 % of the time (the old loop spun at 100 %); running, the frame rate is unchanged
+(the LCD/SPI transfer is the limit, ~25 frames/s).
 
 Interrupts (never take the mutex):
 
@@ -73,7 +104,7 @@ Interrupts (never take the mutex):
 |---|---|
 | `SysTick_Handler` (1 kHz) | `HAL_IncTick()` always; `OscSlowTick()` (SLOW sampler); `xPortSysTickHandler()` only once the scheduler runs |
 | `USART3_IRQHandler` → `HAL_UART_RxCpltCallback` | puts each received byte in the 96-byte ring `uart_rx[]` |
-| `DMA2_Stream0_IRQHandler`, `ADC_IRQHandler` | FAST capture completion |
+| `DMA2_Stream0_IRQHandler`, `ADC_IRQHandler` (CubeMX) → `HAL_ADC_ConvCpltCallback` / `HAL_ADC_ErrorCallback` | FAST capture completion |
 
 **Hardware lesson (v66–v71):** creating the mutex early in `main()` (before the
 LCD/peripheral init) hung the board with a white screen. Creating it immediately
@@ -84,7 +115,7 @@ before `xTaskCreate` works. Never call `xSemaphoreTake/Give` before
 
 ## 4. One frame, step by step
 
-Inside `vMainTask`, every 33 ms (if not frozen):
+Inside `OscTask`, every 33 ms (if not frozen):
 
 1. **Capture**
    - FAST (T/DIV 5 µs … 6 ms): `AdcCaptureFrame()`
@@ -186,10 +217,15 @@ Full list: `UART_input_commands.md`.
 
 ---
 
-## 9. Shared state and the mutex (RTOS step 3a)
+## 9. Shared state and the locks
 
-Today there is still **one task**; the mutex prepares the split into input /
-display tasks. `xOscMutex` is a plain (non-recursive) mutex.
+Two plain (non-recursive) mutexes:
+
+- `xAppLock` (`APP_LOCK/APP_UNLOCK`, `app_main.h`): whoever holds it may touch any scope
+  state and the LCD. OscTask holds it for one whole pass, InputTask for one poll.
+- `xOscMutex` (`OSC_LOCK/OSC_SET`, `osc_state.h`): the older fine-grained lock (step 3a)
+  for the variables below; taken only inside a pass/poll. Order: `xAppLock` first, then
+  `xOscMutex`, never the reverse.
 
 | Protected variable | Written by | How |
 |---|---|---|
@@ -198,8 +234,8 @@ display tasks. `xOscMutex` is a plain (non-recursive) mutex.
 | Slow block writes | `SlowCaptureFrame` | its single call site is wrapped in the lock |
 
 Rules (checked by `tests/test_rtos_step3a.py`): no lock from any ISR, no nested
-locking, no UART/LCD/HAL call inside a critical section, nothing locks before the
-scheduler starts.
+`OSC_LOCK`, no UART/LCD/HAL call inside an `OSC_LOCK` section, nothing locks before the
+scheduler starts, `HandleButtons`/`UartPoll` only in InputTask, one `APP_LOCK` per pass.
 
 ---
 
@@ -227,9 +263,11 @@ older scripts print `FAIL` but exit 0). Needs `gcc`/`clang` and Python 3.
 | `test_vdiv_range.py` | V/DIV table 0.0001–2 V |
 | `test_rtos_step3a.py` | mutex rules (pre-scheduler, ISR, nesting) |
 
-The tests extract code between the block markers (`SLOW_BEGIN =`, `AUTO_TB_BEGIN =`,
-`DRAWWF_BEGIN`, …). **Keep every marker unique** in `main.c`, and never mention a
-marker name in another comment.
+The tests read the application through `tests/app_src.py`, which joins the modules into
+one text in reading order (and inlines `AppInit`/`AppStart` into `main()`), then extract
+code between the block markers (`SLOW_BEGIN =`, `AUTO_TB_BEGIN =`, `DRAWWF_BEGIN`, …).
+**Keep every marker unique** across the modules, and never mention a marker name in
+another comment. A new module must be added to `MODULES` in `app_src.py`.
 
 Some contracts compare against archived sources in `builds/` (kept on the
 developer machine, not in git); those checks are skipped when the archive is absent.
@@ -238,11 +276,10 @@ developer machine, not in git); those checks are skipped when the archive is abs
 
 ## 11. Building and flashing
 
-- **STM32CubeIDE:** open the project and build (Debug). FreeRTOS sources must be
-  in the build: `Middlewares/FreeRTOS/Source/*.c`, `portable/GCC/ARM_CM7/r0p1/port.c`,
-  `portable/MemMang/heap_4.c`, include paths `Middlewares/FreeRTOS/Source/include`
+- **STM32CubeIDE:** open the project and build (Debug). `.cproject` already has the
+  `ThirdParty` source folder and the include paths `ThirdParty/FreeRTOS/Source/include`
   and `.../portable/GCC/ARM_CM7/r0p1`.
-- **Command line (arm-none-eabi-gcc):** compile `Core/Src/*.c`, `Core/Src/ILI9341/*.c`,
+- **Command line (arm-none-eabi-gcc):** `python3 tests/build_arm.py`, or compile `Core/Src/**/*.c`,
   `Drivers/STM32F7xx_HAL_Driver/Src/*.c` (skip `*template*`) and the FreeRTOS files
   above with `-mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -DUSE_HAL_DRIVER -DSTM32F767xx`,
   assemble `Core/Startup/startup_stm32f767zitx.s`, link with `-TSTM32F767ZITX_FLASH.ld
@@ -264,10 +301,14 @@ developer machine, not in git); those checks are skipped when the archive is abs
 | v73 | V/DIV down to 0.0001 V | verified |
 | v74/v76 | filter edges: no spikes at 2 MHz / 500 kHz | verified (edge/middle 0.83–1.02 at 420–520 kHz) |
 | v75 | vertical grid line every 1 T/DIV | flashed |
+| v93 | `main.c` split into `Core/Src/app` modules (pure move; machine code identical per function) | verified (A/B) |
+| v94 | CubeMX owns ADC1/DMA (`adc.c`, `dma.c`); kernel moved to `ThirdParty/`; Generate is safe | verified (register A/B) |
+| v95 | OscTask + InputTask under the app lock; OscTask sleeps between deadlines | verified (frame rate A/B, HOLD idle 98 %) |
+| v96 | SLOW trigger edge 2 points from the left like FAST (was 10 %); readout keeps the old window | host tests; board: FAST only (no slow signal on the input) |
 
 ## 13. Known limitations
 
 - Input 0–3.3 V only; above ~1 MHz amplitude readings are approximate (2.4 samples/cycle at 2 MHz).
 - STABLE has no effect below ~45 Hz (SLOW always rolls) — changing that needs the Slow block.
 - V/DIV below a few mV/div shows ADC noise, not detail.
-- Still one RTOS task; the input-task / display-task split is the next step.
+- One display task: the LCD (SPI, ~25 ms per frame) is the bottleneck, so a separate draw task would not raise the frame rate.

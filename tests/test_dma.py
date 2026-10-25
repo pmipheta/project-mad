@@ -1,8 +1,9 @@
 """Compile real capture routine against HAL/cache/DWT fault injection."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import re, subprocess, os
 root=Path(__file__).resolve().parents[1]
-s=(root/'Core/Src/main.c').read_text()
+s=app_source()
 out=Path(__import__('tempfile').gettempdir())/'osc_regression';out.mkdir(exist_ok=True)
 def fn(name):
  m=re.search(r'^(?:static\s+)?(?:inline\s+)?(?:void|uint8_t|uint32_t)\s+'+name+r'\([^;]*?\)\s*\{',s,re.M);assert m,name

@@ -4,9 +4,10 @@ smooths the middle (2 MHz = 2.4 points/cycle, 500 kHz = 9.6 points/cycle at 5 us
 v74 fixed 2.4 pts/cycle but missed ~9.6 (edges 1.8x on the board) -> v76:
   FAST: real display points just outside the window (OscExtPoint) -> edge = exact centred filter;
   no outside data (SLOW): fallback rule, edges never noticeably taller than the middle."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 import pathlib, re, subprocess, sys, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-src = (ROOT/'Core/Src/main.c').read_text()
+src = app_source()
 m = re.search(r'^static void OscProcessFrame\(void\)\n\{', src, re.M)
 assert m, 'OscProcessFrame not found'
 p = src.index('{', m.start()); d = 1; i = p+1

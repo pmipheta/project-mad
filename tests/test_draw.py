@@ -1,11 +1,12 @@
 """Host test of the LCD column renderer (DrawWaveform), extracted from Core/Src/main.c between DRAWWF_BEGIN/END.
 Simulates the screen as a pixel array; after every frame the screen must equal the ideal picture (trace + grid + cursors), exactly:
 no gaps in the trace, no stale pixels from earlier frames."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_draw'; OUT.mkdir(parents=True, exist_ok=True)
-src = (ROOT/'Core/Src/main.c').read_text()
+src = app_source()
 import re
 # v75: take the real grid rule (GRID_* + IS_GRID_DOT) from main.c so the test cannot drift from the firmware
 _gl, _cont = [], False
