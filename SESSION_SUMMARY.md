@@ -1,3 +1,5 @@
+> **Historical** (Sept 2026, before FreeRTOS and the module split). The current structure is described in `DEVELOPER_GUIDE.md`.
+
 # สรุปเซสชัน — โปรเจกต์ Oscilloscope (NUCLEO-F767ZI + ILI9341)
 
 > ไฟล์นี้สำหรับเริ่มเซสชันใหม่: อ่านไฟล์นี้ + `UART_input_commands.md` แล้วทำงานต่อได้ทันที

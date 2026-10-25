@@ -10,7 +10,7 @@ equivalent, so all functions remain testable without wiring anything up
 |---|---|---|
 | **PB0** | INCREASE (+) | Increases whichever setting is currently selected (V/DIV, T/DIV, FILTER, or TRIG). Hold to auto-repeat (same accel timing as the old UART UP key). |
 | **PB1** | DECREASE (−) | Same as PB0, decreases. |
-| **PB2** | AUTO | One-shot auto-scale: picks V/DIV + T/DIV + FAST/SLOW once to fit ~2–4 cycles on screen, then stays fixed (same as UART `z`). |
+| **PB2** | AUTO / AC-DC | Short press: one-shot auto-scale: picks V/DIV + T/DIV + FAST/SLOW once to fit ~2–4 cycles on screen, then stays fixed (same as UART `z`). Hold ≥1500 ms: toggle AC ↔ DC coupling (same as UART `cal`). |
 | **PB3** | FAST/SLOW | Short press: toggle forced FAST↔SLOW mode (same as UART `F`). Long press ≥1000 ms: return to automatic FAST/SLOW switching (same as UART `A`). |
 | **PA3** | SELECT V/DIV ↔ T/DIV | Toggles which of these two is the active setting for PB0/PB1 to adjust. While the picture is frozen, T/DIV isn't a valid setting (the frozen menu is C1/C2/V-DIV only) — pressing PA3 while frozen just selects V/DIV every time, harmlessly. |
 | **PC0** | SELECT FILTER ↔ TRIG | Toggles which of these two is active for PB0/PB1. Does nothing while frozen (neither exists in the frozen menu). |
@@ -23,7 +23,7 @@ equivalent, so all functions remain testable without wiring anything up
   reused directly (natural fit), HOLD and SET pins were repurposed to AUTO
   and FAST/SLOW since the final 8-button scheme doesn't need a scrolling
   menu.
-- PA3/PC0/PC3/PF3 are new pins, manually configured in `main.c` (CubeMX
+- All 8 button pins are configured by hand in `AppInit()` (`Core/Src/app/app_main.c`) (CubeMX
   `.ioc` has not been regenerated with these — if you ever reopen the
   project in CubeIDE and regenerate code, these 4 GPIO inits must be kept
   or re-added by hand).

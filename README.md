@@ -2,6 +2,8 @@
 
 STM32F767ZI oscilloscope firmware built with STM32CubeIDE and FreeRTOS.
 
+**New to the code? Start with [`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md)** — what every file and function does, how a frame is made, and how to make common changes.
+
 ## Project layout
 
 - `Core/Src/app/`, `Core/Inc/app/` — the application, one module per job (see `SOURCE_CODE_GUIDE.md` §2)

@@ -1,3 +1,5 @@
+> **Historical.** Notes from the single-task FreeRTOS era (up to v76). The current structure (two tasks, app modules) is described in `DEVELOPER_GUIDE.md`.
+
 # FreeRTOS refactor — status (2026-10-20)
 
 ## On the board now: v76 (this commit)

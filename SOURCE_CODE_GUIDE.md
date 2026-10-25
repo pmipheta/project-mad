@@ -1,7 +1,8 @@
 # Source code guide — STM32F767 oscilloscope (`oscilloscope`)
 
 This explains how the firmware is organised and how a signal travels from the
-input pin to the LCD. Read this together with:
+input pin to the LCD. For a file-by-file and function-by-function reference, and
+for how to make common changes, see **`DEVELOPER_GUIDE.md`**. Read this together with:
 
 - `BUTTON_HARDWARE_MAP.md` — the 8 physical buttons, pins and wiring
 - `UART_input_commands.md` — every serial command
@@ -155,8 +156,9 @@ Inside `OscTask`, every 33 ms (if not frozen):
   shows a full picture at once.
 - `SlowCaptureFrame()` decimates the newest window of that history into
   `raw_samples`, with its own frequency reader (`SlowFreqFromPts`) and alias guards.
-- **This block is frozen:** every change since v59 is checked to leave it
-  byte-identical. Do not edit it without a separate decision.
+- `SlowFindTrigger()` locks the picture to the newest edge (2 points from the left
+  since v96); without an edge the picture scrolls. Changes here must keep
+  `tests/test_slow.py` passing and be checked on the board with a slow signal.
 
 ### FAST ↔ SLOW (AUTO time base) — `AUTO_TB_BEGIN =` block
 - FAST → SLOW below **70 Hz**, SLOW → FAST above **90 Hz** (hysteresis between).
@@ -188,7 +190,7 @@ Scales:
 | Feature | Variable | What it does |
 |---|---|---|
 | FREEZE (PF3, UART `h`) | `hold_active` | stops capturing; enables cursors C1/C2, MOVE X/Y, zoom |
-| STABLE / trigger-lock (PC3 short, UART `m`) | `osc_stable` | keeps capturing live but aligns each frame on the trigger edge. Only effective from **45 Hz** up (`osc_lock_auto`); SLOW signals always roll |
+| STABLE / trigger-lock (PC3 short, UART `m`) | `osc_stable` | keeps capturing live but aligns each frame on the trigger edge. FAST locks from **45 Hz** up (`osc_lock_auto`); SLOW locks whenever its history has a clean edge (v87) |
 | Zoom (`+`/`-` while frozen) | `mv_zoom_x/y` | X up to ×64, Y up to ×32, from the stored raw data (no invented detail) |
 | Pan | `mv_x_pts`, `mv_y_steps` | over the stored outside points / frozen SLOW history |
 | Cursors | `osc_c1`, `osc_c2` | U1, U2, dV, dt in the header while frozen |
@@ -203,7 +205,7 @@ as the UART commands, so both always behave identically.
 | Button | Action |
 |---|---|
 | PB0 / PB1 | + / − on the selected setting (frozen: same, never moves the trace) |
-| PB2 | one-shot AUTO scale |
+| PB2 | short: one-shot AUTO scale · hold 1.5 s: AC ↔ DC coupling |
 | PB3 | short: FAST↔SLOW (manual) · long: automatic FAST/SLOW again |
 | PA3 | select V/DIV ↔ T/DIV |
 | PC0 | select FILTER ↔ TRIG |
@@ -309,6 +311,5 @@ developer machine, not in git); those checks are skipped when the archive is abs
 ## 13. Known limitations
 
 - Input 0–3.3 V only; above ~1 MHz amplitude readings are approximate (2.4 samples/cycle at 2 MHz).
-- STABLE has no effect below ~45 Hz (SLOW always rolls) — changing that needs the Slow block.
 - V/DIV below a few mV/div shows ADC noise, not detail.
 - One display task: the LCD (SPI, ~25 ms per frame) is the bottleneck, so a separate draw task would not raise the frame rate.
