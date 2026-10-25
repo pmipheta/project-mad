@@ -454,6 +454,25 @@ static void UartInputInit(void)
  * -------------------------------------------------------------------------- */
 static int OscExtPoint(int k, float *v);   /* v76: real display point k (<0 or >=N_SAMPLES) of THIS FAST frame; defined in MOVE_DATA */
 static int SlowExtPoint(int k, float *v);  /* v80: the same for a SLOW frame; defined in SLOW */
+
+/* v82: display filter window actually used. The FILTER setting (osc_fwin) is a boxcar; at the measured frequency it keeps
+ * H = sin(win*pi/ppc) / (win*sin(pi/ppc)) of the amplitude (ppc = display points per period). 5 points at 23.6 ppc (2 kHz, 0.5 ms/div)
+ * drew the wave 7 % too small, so it no longer matched V/DIV on the grid. The window is narrowed (by 2) until H >= 0.98.
+ * Unknown frequency, or < 2 points per period (not drawable as a wave, see v81): the setting as it is. */
+static int OscFiltWin(void)
+{
+    int win = (osc_fwin < 1) ? 1 : osc_fwin;
+    if ((win % 2) == 0) win++;
+    if (osc_raw_freq > 0.0f && osc_fs_eff > 0.0f) {
+        float ppc = osc_fs_eff / osc_raw_freq;
+        if (ppc >= 2.0f) {
+            float th = 3.14159265f / ppc;
+            while (win > 1 && sinf((float)win * th) / ((float)win * sinf(th)) < 0.98f) win -= 2;
+        }
+    }
+    return win;
+}
+
 static void OscProcessFrame(void)
 {
     const float k = ADC_VREF / (float)ADC_FULL;
@@ -484,8 +503,7 @@ static void OscProcessFrame(void)
     osc_offset_v = (osc_offset_ct - (float)ADC_MID) * k;
 
     /* Moving average filter (window 1..21, คี่) */
-    win  = (osc_fwin < 1) ? 1 : osc_fwin;
-    if ((win % 2) == 0) win++;
+    win  = OscFiltWin();   /* v82: odd, never shrinks the wave by > 2 % */
     half = win / 2;
 
     for (int i = 0; i < N_SAMPLES; i++) {
@@ -2559,6 +2577,25 @@ static float FAST_O2 AdcRawFrequency(const uint16_t *buf, uint32_t n, float fs)
                 for (uint32_t i = i0; i <= i1; i++) { float d = (float)buf[i] - mean; sq += d * d; }
                 osc_raw_mean_ct = mean; osc_raw_rms_ct = sqrtf(sq / cnt);
                 osc_raw_min_ct = (float)mn; osc_raw_max_ct = (float)mx; osc_raw_valid = 1;
+                {   /* v82: Mx / Mn of the raw min/max include the noise peaks: 2.47 V read for a 2.40 V sine, whose trace spans 2.4 div at 1 V/div,
+                     * so the number did not match the grid. Take them from a boxcar of k = 1/32 period (3..64 samples, keeps > 99.8 % of a sine peak,
+                     * noise / sqrt(k)) over the same whole cycles. Fewer than 96 samples per period: the plain min/max as before. */
+                    uint32_t k = (uint32_t)(fs / f / 32.0f);
+                    if (k > 64u) k = 64u;
+                    if (k >= 3u && i1 > i0 + k) {
+                        uint32_t run = 0;
+                        float smn = 1e9f, smx = -1e9f;
+                        for (uint32_t i = i0; i < i0 + k; i++) run += buf[i];
+                        for (uint32_t i = i0 + k; ; i++) {
+                            float a = (float)run / (float)k;
+                            if (a < smn) smn = a;
+                            if (a > smx) smx = a;
+                            if (i > i1) break;
+                            run += buf[i]; run -= buf[i - k];
+                        }
+                        osc_raw_min_ct = smn; osc_raw_max_ct = smx;
+                    }
+                }
             }
         }
         return f;
@@ -3542,8 +3579,7 @@ static void MvBuildZoom(void)
 {
     float cnt[N_SAMPLES];
     const float kv = ADC_VREF / (float)ADC_FULL;
-    int win = (osc_fwin < 1) ? 1 : osc_fwin, half, zw;
-    if ((win % 2) == 0) win++;
+    int win = OscFiltWin(), half, zw;   /* v82: same window as OscProcessFrame */
     zw = win / mv_zoom_x; if (zw < 1) zw = 1; if ((zw % 2) == 0) zw++;
     half = zw / 2;
     for (int i = 0; i < N_SAMPLES; i++) cnt[i] = MvZoomCount(1920 + ((i - N_SAMPLES / 2) * 16) / mv_zoom_x + mv_x_q);
@@ -3560,8 +3596,7 @@ static void MvBuildView(void)                /* mv_view_v[] = the frozen capture
     float cnt[N_SAMPLES];
     if (mv_zoom_x > 1) { MvBuildZoom(); return; }       /* v57 */
     const float kv = ADC_VREF / (float)ADC_FULL;
-    int win = (osc_fwin < 1) ? 1 : osc_fwin, half;
-    if ((win % 2) == 0) win++;
+    int win = OscFiltWin(), half;       /* v82: same window as OscProcessFrame */
     half = win / 2;
     for (int i = 0; i < N_SAMPLES; i++) {
         int k = i + mv_x_pts;

@@ -114,7 +114,7 @@ static uint8_t AdcCaptureStart(uint32_t n,uint32_t*t0){uint32_t u;start_calls++;
 static uint8_t AdcCaptureCollect(uint32_t n,uint32_t t0,uint32_t*t_us){(void)t0;*t_us=(uint32_t)(n/0.8f);return 1;}
 static void AdcAbortPending(void){if(adc_pend){adc_pend=0;abort_calls++;}}
 '''
-body='\n'.join(function(x) for x in ['OscProcessFrame','OscMeasureFrame','AdcRawFrequency','AdcPlanFrame','AdcPreFor','AdcPrestart','AdcCaptureFrame','MapToScreen','OscAutoScale','OscAutoScaleStep','AutoScale','MvStoreExt','AtbPickFast','AtbPickSlow','OscAutoPickTdiv','OscAutoApply'])
+body='\n'.join(function(x) for x in ['OscFiltWin','OscProcessFrame','OscMeasureFrame','AdcRawFrequency','AdcPlanFrame','AdcPreFor','AdcPrestart','AdcCaptureFrame','MapToScreen','OscAutoScale','OscAutoScaleStep','AutoScale','MvStoreExt','AtbPickFast','AtbPickSlow','OscAutoPickTdiv','OscAutoApply'])
 # State-machine contract: both entry points must use the same implementation,
 # never consume held/failed captures, and never derive frequency from pixels.
 auto = function('OscAutoScaleStep')

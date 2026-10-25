@@ -99,6 +99,7 @@ static void UartPrint(const char*s){(void)s;}
 #include "state.c"
 static void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n);
 static int SlowExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v80 SLOW edge neighbours: SLOW block not compiled here */
+static int OscFiltWin(void){ int w = (osc_fwin < 1) ? 1 : osc_fwin; if ((w % 2) == 0) w++; return w; }   /* v82: no frequency cap here (test_edge_filter covers it) */
 static void MvFreezeCapture(void); static void MvBuildView(void); static void AutoScale(void);
 /* --- model of the measurement chain (as test_autotb.py) --- */
 static double F=1000, A=3.0, FAST_MAX=2.2e6; static double t_change_ms=-1e9, lastF=-1; static int hist_blind=0;
