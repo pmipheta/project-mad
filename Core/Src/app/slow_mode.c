@@ -232,7 +232,7 @@ int SlowExtPoint(int k, float *v)                      /* v80: display filter ne
 }
 
 /* TRIGGERED VIEW for 10..50 ms/div (windows of 0.1-0.5 s): lock the picture to the most recent rising (or falling) edge of the history,
- * with the edge 10 % from the left, like a scope. The picture then stands still instead of scrolling, and a change of frequency
+ * with the edge 2 display points from the left like FAST (v96; was 10 % from the left: the screen began with the opposite slope). The picture then stands still instead of scrolling, and a change of frequency
  * or amplitude shows up within one period. v87: every SLOW T/DIV in AUTO (the 8 s history covers 1.5 windows even at 500 ms/div); ROLL scrolls.
  * Returns 1 and the view end (tick, sub-tick offset) when a clean edge exists, 0 = free-run (no signal / no edge). */
 static volatile uint8_t dbg_slow_trig = 0;
@@ -241,10 +241,10 @@ static uint8_t SlowFindTrigger(uint32_t period_us, uint32_t *t_view, uint32_t *b
 {
     uint32_t w_ms = (uint32_t)(((uint64_t)period_us * N_SAMPLES) / 1000u);          /* window length in ms */
     uint32_t last = slow_last_t;
-    uint32_t pre  = w_ms / 10u;                                                      /* edge sits 10 % from the left */
+    float    pre  = 2.0f * (float)period_us / 1000.0f;                               /* v96: edge 2 display points from the left (FAST lead) */
     uint32_t reach = w_ms + w_ms / 2u;                                               /* look back 1.5 windows */
     if (!osc_stable || slow_valid_cnt < reach + 8u) return 0;   /* v87: AUTO locks at every SLOW T/DIV and frequency (was >= 45 Hz and <= 50 ms/div only, so ROLL/AUTO did nothing at 30 Hz); ROLL never */
-    uint32_t newest_ok = last - (w_ms - pre) - 1u;                                   /* view must end before the newest tick */
+    uint32_t newest_ok = last - (uint32_t)ceilf((float)w_ms - pre) - 1u;             /* view must end before the newest tick */
     uint32_t s0 = last - reach;
     uint16_t mn = 0xFFFF, mx = 0;
     for (uint32_t t = s0; t <= last; t++) {
@@ -269,8 +269,8 @@ static uint8_t SlowFindTrigger(uint32_t period_us, uint32_t *t_view, uint32_t *b
         }
     }
     if (!found) return 0;
-    {   /* newest displayed point = edge + 0.9 window - one point; express it as tick (ceil) minus a sub-tick offset */
-        float t_new = tc + (float)(w_ms - pre) - (float)period_us / 1000.0f;
+    {   /* newest displayed point = edge + window - 2 points - one point; express it as tick (ceil) minus a sub-tick offset */
+        float t_new = tc + ((float)w_ms - pre) - (float)period_us / 1000.0f;
         uint32_t tick = (uint32_t)ceilf(t_new);
         if (tick > last) return 0;
         *t_view = tick + 1u;                                                         /* exclusive end */
@@ -411,7 +411,8 @@ float SlowProbeFreq(int ti)
 /* history -> raw_samples[] like AdcCaptureFrame(), plus the osc_* values the readout needs */
 void SlowCaptureFrame(void)
 {
-    uint16_t pts[N_SAMPLES];
+    uint16_t pts[N_SAMPLES], mpts[N_SAMPLES];
+    const uint16_t *meas = pts;                               /* v96: the window the readout measures */
     uint16_t vmin = 0xFFFF, vmax = 0, spread, rough;
 
     new_frame_ready = 0;
@@ -425,7 +426,11 @@ void SlowCaptureFrame(void)
     if (slow_valid_cnt == 0) { dbg_adc_ok = 0; osc_dirty = 1; return; }
     uint32_t ext_tv, ext_bk = 0, ext_pus = slow_period_us;    /* v80: view + time base of the drawn points, for SlowStoreExt / slow_ext_P */
     {   uint32_t tv = 0, bk = 0;
-        if (SlowFindTrigger(slow_period_us, &tv, &bk)) { spread = SlowBuildPointsAt(pts, slow_period_us, tv, bk, &rough); dbg_slow_trig = 1; ext_tv = tv; ext_bk = bk; }
+        if (SlowFindTrigger(slow_period_us, &tv, &bk)) { spread = SlowBuildPointsAt(pts, slow_period_us, tv, bk, &rough); dbg_slow_trig = 1; ext_tv = tv; ext_bk = bk;
+            /* v96: the readout keeps the pre-v96 window (edge 10 % from the left = 22 points earlier than the picture): its first edge needs the
+             * slope before it to arm the hysteresis, so with the edge at point 2 a 3-cycle window (0.6 Hz @500 ms/div) lost one edge and read 0 Hz */
+            uint32_t mb = bk + (N_SAMPLES / 10u - 2u) * slow_period_us; uint16_t r3;
+            (void)SlowBuildPointsAt(mpts, slow_period_us, tv - mb / 1000u, mb % 1000u, &r3); meas = mpts; }
         else { ext_tv = slow_last_t + 1u; spread = SlowBuildPointsAt(pts, slow_period_us, ext_tv, 0u, &rough); dbg_slow_trig = 0; }   /* v80: = SlowBuildPoints, view kept */
     }
     for (uint32_t i = 0; i < N_SAMPLES; i++) {
@@ -449,7 +454,7 @@ void SlowCaptureFrame(void)
     }
     osc_fs_eff   = 1000000.0f / (float)slow_period_us;
     osc_raw_valid = 0;
-    osc_raw_freq = SlowFreqFromPts(pts, osc_fs_eff, &osc_raw_vpp, 1);
+    osc_raw_freq = SlowFreqFromPts(meas, osc_fs_eff, &osc_raw_vpp, 1);
     if (osc_raw_freq <= 0.0f) {   /* the picture's window shows < 2 clean periods (1 Hz in a 200 ms/div window): measure on ANY SLOW window that does.
                                    * Picture and numbers are independent, so the picture can keep its time base while the frequency changes. */
         for (uint32_t k = 0; k < 6u; k++) {

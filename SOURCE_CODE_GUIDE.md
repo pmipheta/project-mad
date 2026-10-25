@@ -304,6 +304,7 @@ developer machine, not in git); those checks are skipped when the archive is abs
 | v93 | `main.c` split into `Core/Src/app` modules (pure move; machine code identical per function) | verified (A/B) |
 | v94 | CubeMX owns ADC1/DMA (`adc.c`, `dma.c`); kernel moved to `ThirdParty/`; Generate is safe | verified (register A/B) |
 | v95 | OscTask + InputTask under the app lock; OscTask sleeps between deadlines | verified (frame rate A/B, HOLD idle 98 %) |
+| v96 | SLOW trigger edge 2 points from the left like FAST (was 10 %); readout keeps the old window | host tests; board: FAST only (no slow signal on the input) |
 
 ## 13. Known limitations
 
