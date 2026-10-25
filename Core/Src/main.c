@@ -1881,6 +1881,7 @@ extern volatile uint16_t dbg_adc_min, dbg_adc_max;
 #endif
 /* ---- header text with a character cache: draw only what changed ------------------------------------------------------- */
 #define HDR_FIELDS 32
+#define HDR_STATUS_ID 31          /* v79: reserved, stable id for the Run/Hold status field (so the 4 states share one cache cell) */
 static char     hdr_txt[HDR_FIELDS][24];
 static uint16_t hdr_fg[HDR_FIELDS], hdr_bg[HDR_FIELDS];
 static uint8_t  hdr_ok[HDR_FIELDS];
@@ -1895,7 +1896,10 @@ static void HdrText(int id, const char *t, uint8_t x, uint8_t y, uint16_t fg, ui
     for (int k = 0; k < ((n > m) ? n : m); k++) {
         char ch = (k < n) ? t[k] : ' ';
         if (!force && k < m && ch == hdr_txt[id][k]) continue;         /* this character is already on the screen */
-        ILI9341_Draw_Char(ch, (uint8_t)(x + k * HDR_CHAR_W), y, fg, 1, (k < n) ? bg : BLACK);
+        /* v79: erase a newly-shortened field by rewriting the leftover cells with the FIELD's own
+         * background, not BLACK -- for the status field ("ADC ERR"<->"RUN ") a BLACK erase left dark
+         * blobs that read as a garbled "RUN ERR" next to the green RUN text. */
+        ILI9341_Draw_Char(ch, (uint8_t)(x + k * HDR_CHAR_W), y, fg, 1, bg);
     }
     memcpy(hdr_txt[id], t, (size_t)n); hdr_txt[id][n] = 0;
     hdr_fg[id] = fg; hdr_bg[id] = bg; hdr_ok[id] = 1;
@@ -1938,15 +1942,15 @@ static void DrawTopPanel(void)
     snprintf((char *)dbg_lcd_set, sizeof(dbg_lcd_set), "%s", buf);
 
     /* Run / Hold status — x=226 */
-    if (!osc_frame_valid) {
-        HDRT("ADC ERR", 226, 1, RED, 1, BLACK);
-    } else if (hold_active) {
-        HDRT("HOLD", 226, 1, RED, 1, BLACK);
-    } else if (trigger_mode == TRIG_SINGLE && !single_captured) {
-        HDRT("WAIT", 226, 1, ORANGE, 1, BLACK);
-    } else {
-        HDRT("RUN ", 226, 1, GREEN, 1, BLACK);
-    }
+    /* v79: the four states previously each used its own HDRT(__COUNTER__, ...) id, so switching state
+     * (e.g. RUN -> ADC ERR) wrote a fresh cache cell and never erased the previous state's text at the
+     * same x=226 position -> the two overprinted as "RUN ERR". Use ONE id so the cache diff erases. */
+    const char *st_txt; uint16_t st_fg;
+    if (!osc_frame_valid)                             { st_txt = "ADC ERR"; st_fg = RED; }
+    else if (hold_active)                             { st_txt = "HOLD";    st_fg = RED; }
+    else if (trigger_mode == TRIG_SINGLE && !single_captured) { st_txt = "WAIT"; st_fg = ORANGE; }
+    else                                              { st_txt = "RUN ";    st_fg = GREEN; }
+    HdrText(HDR_STATUS_ID, st_txt, 226, 1, st_fg, 1, BLACK);
 
     /* ── Row 2 ──────────────────────────────────────────────────────────── */
 
