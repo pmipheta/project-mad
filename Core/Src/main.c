@@ -453,6 +453,7 @@ static void UartInputInit(void)
  * ทำงานเหมือน calibrate_offset() + moving_average_filter() ของ simulator
  * -------------------------------------------------------------------------- */
 static int OscExtPoint(int k, float *v);   /* v76: real display point k (<0 or >=N_SAMPLES) of THIS FAST frame; defined in MOVE_DATA */
+static int SlowExtPoint(int k, float *v);  /* v80: the same for a SLOW frame; defined in SLOW */
 static void OscProcessFrame(void)
 {
     const float k = ADC_VREF / (float)ADC_FULL;
@@ -3055,6 +3056,65 @@ static uint16_t SlowBuildPoints(uint16_t *out, uint32_t period_us, uint16_t *rou
     return SlowBuildPointsAt(out, period_us, slow_last_t + 1u, 0u, rough_out);
 }
 
+/* v80: the real display points just BEFORE the SLOW window (point -1-c), same averaging as SlowBuildPointsAt, for the display filter's left
+ * neighbours (OscExtPoint). Without them OscProcessFrame slid the edge window inward and the first `half` points came out as one flat block
+ * = the spike at the left edge (the FAST twin was fixed in v76/v78 with mv_ext_lo). Points older than the history are not stored. */
+#define SLOW_EXT_N 10                                         /* display filter half-width max (window 21) */
+static uint16_t slow_ext_lo[SLOW_EXT_N];
+static int      slow_nlo = 0;
+static void SlowStoreExt(uint32_t period_us, uint32_t t_view, uint32_t back_us)
+{
+    uint32_t have = (slow_valid_cnt < SLOW_HIST_N) ? slow_valid_cnt : SLOW_HIST_N;   /* ticks of history that exist */
+    uint32_t newest = slow_last_t;
+    slow_nlo = 0;
+    for (uint32_t c = 0; c < SLOW_EXT_N; c++) {
+        uint32_t k = N_SAMPLES + c;                           /* points back from the newest displayed point */
+        if (period_us < 1000u) {
+            uint32_t off_us = k * period_us + back_us;
+            uint32_t off_ms = off_us / 1000u, rem = off_us % 1000u;
+            uint32_t t_low = (t_view - 1u) - off_ms - (rem ? 1u : 0u);
+            if (newest - t_low + 1u > have) break;
+            uint32_t a = slow_hist[t_low & (SLOW_HIST_N - 1u)];
+            uint32_t b = rem ? slow_hist[(t_low + 1u) & (SLOW_HIST_N - 1u)] : a;
+            slow_ext_lo[c] = (uint16_t)((a * rem + b * (1000u - rem)) / 1000u);
+        } else {
+            uint32_t off_a = ((k + 1u) * period_us + 999u) / 1000u;
+            uint32_t off_b = (k * period_us + 999u) / 1000u;
+            uint32_t sum = 0, cnt = 0;
+            if (newest + 1u - (t_view - off_a) > have) break;
+            for (uint32_t tk = t_view - off_a; tk != t_view - off_b; tk++) { sum += slow_hist[tk & (SLOW_HIST_N - 1u)]; cnt++; }
+            if (!cnt) break;
+            slow_ext_lo[c] = (uint16_t)(sum / cnt);
+        }
+        slow_nlo = (int)c + 1;
+    }
+}
+
+/* v80: the right-edge neighbours of a SLOW frame. In roll mode the newest displayed point IS the newest tick, so nothing real exists after it.
+ * Continue the trace one (or m) measured periods back: raw_samples[N + c - m*P], linear interpolation at the fractional position. A periodic
+ * signal (sine, square, triangle) continues exactly, so the edge gets ~the same centred filter as the middle instead of the slide that repeated
+ * one value over the last `half` points (the flat block). slow_ext_P = 0 (no frequency): the old fallback rule. */
+static float slow_ext_P = 0.0f;                               /* display points per period of THIS frame's raw_samples */
+static int SlowExtHi(int c, float *v)
+{
+    if (slow_ext_P < 2.0f || c < 0 || c >= SLOW_EXT_N) return 0;
+    float m = ceilf((float)(c + 1) / slow_ext_P);
+    float x = (float)(N_SAMPLES + c) - m * slow_ext_P;
+    if (x < 0.0f) return 0;
+    int   i0 = (int)x;
+    float fr = x - (float)i0;
+    if (i0 >= N_SAMPLES - 1) { *v = (float)raw_samples[N_SAMPLES - 1]; return 1; }
+    *v = (float)raw_samples[i0] * (1.0f - fr) + (float)raw_samples[i0 + 1] * fr;
+    return 1;
+}
+
+static int SlowExtPoint(int k, float *v)                      /* v80: display filter neighbour k (<0 or >=N_SAMPLES) of THIS SLOW frame */
+{
+    if (k < 0 && (-k - 1) < slow_nlo) { *v = (float)slow_ext_lo[-k - 1]; return 1; }   /* left: real history */
+    if (k >= N_SAMPLES) return SlowExtHi(k - N_SAMPLES, v);                           /* right: one period back */
+    return 0;
+}
+
 /* TRIGGERED VIEW for 10..50 ms/div (windows of 0.1-0.5 s): lock the picture to the most recent rising (or falling) edge of the history,
  * with the edge 10 % from the left, like a scope. The picture then stands still instead of scrolling, and a change of frequency
  * or amplitude shows up within one period. Longer windows (>= 100 ms/div) keep scrolling (roll mode).
@@ -3241,11 +3301,13 @@ static void SlowCaptureFrame(void)
     osc_raw_freq = osc_raw_vpp = 0.0f;
     osc_meas = (OscMeasure){0};
     strcpy(osc_det, "INVALID");
+    slow_ext_P = 0.0f;                                        /* v80: set below once this frame's frequency is known */
 
     if (slow_valid_cnt == 0) { dbg_adc_ok = 0; osc_dirty = 1; return; }
+    uint32_t ext_tv, ext_bk = 0, ext_pus = slow_period_us;    /* v80: view + time base of the drawn points, for SlowStoreExt / slow_ext_P */
     {   uint32_t tv = 0, bk = 0;
-        if (SlowFindTrigger(slow_period_us, &tv, &bk)) { spread = SlowBuildPointsAt(pts, slow_period_us, tv, bk, &rough); dbg_slow_trig = 1; }
-        else                                           { spread = SlowBuildPoints(pts, slow_period_us, &rough);              dbg_slow_trig = 0; }
+        if (SlowFindTrigger(slow_period_us, &tv, &bk)) { spread = SlowBuildPointsAt(pts, slow_period_us, tv, bk, &rough); dbg_slow_trig = 1; ext_tv = tv; ext_bk = bk; }
+        else { ext_tv = slow_last_t + 1u; spread = SlowBuildPointsAt(pts, slow_period_us, ext_tv, 0u, &rough); dbg_slow_trig = 0; }   /* v80: = SlowBuildPoints, view kept */
     }
     for (uint32_t i = 0; i < N_SAMPLES; i++) {
         if (pts[i] < vmin) vmin = pts[i];
@@ -3261,8 +3323,10 @@ static void SlowCaptureFrame(void)
         slow_pv_t = nowt;
         if (slow_pv_cur < tgt)      { slow_pv_cur *= 1.15f; if (slow_pv_cur > tgt) slow_pv_cur = tgt; }
         else if (slow_pv_cur > tgt) { slow_pv_cur /= 1.15f; if (slow_pv_cur < tgt) slow_pv_cur = tgt; }
-        if (!dbg_slow_trig && slow_pv_cur != tgt) { (void)SlowBuildPoints(dpts, (uint32_t)slow_pv_cur, &r2); src = dpts; }
+        if (!dbg_slow_trig && slow_pv_cur != tgt) { (void)SlowBuildPointsAt(dpts, (uint32_t)slow_pv_cur, ext_tv, 0u, &r2); src = dpts; }
         for (uint32_t i = 0; i < N_SAMPLES; i++) raw_samples[i] = (int16_t)src[i];
+        ext_pus = (src == dpts) ? (uint32_t)slow_pv_cur : slow_period_us;
+        SlowStoreExt(ext_pus, ext_tv, ext_bk);   /* v80 */
     }
     osc_fs_eff   = 1000000.0f / (float)slow_period_us;
     osc_raw_valid = 0;
@@ -3292,6 +3356,7 @@ static void SlowCaptureFrame(void)
         osc_raw_freq   = 0.0f;               /* never show an aliased number */
         osc_raw_valid  = 0;
     }
+    if (osc_raw_freq > 0.0f && ext_pus > 0u) slow_ext_P = (1.0e6f / (float)ext_pus) / osc_raw_freq;   /* v80: points per period of the drawn picture */
     osc_capture_tdiv = osc_tdivs_ms[osc_tdiv_i];
     dbg_adc_ok       = 1;
     dbg_adc_min      = vmin;
@@ -3321,7 +3386,9 @@ static uint32_t mv_z_start = 0;
 
 static int OscExtPoint(int k, float *v)       /* v76: the filter's real neighbours just outside the screen (FAST only) */
 {
-    if (slow_active) return 0;                                   /* SLOW frames do not refresh mv_ext_*: never use stale points */
+    if (slow_active) {                                           /* SLOW frames do not refresh mv_ext_*: never use stale points */
+        return SlowExtPoint(k, v);                               /* v80: SLOW neighbours of THIS frame (defined in SLOW) */
+    }
     if (k < 0 && (-k - 1) < mv_nlo)            { *v = (float)mv_ext_lo[-k - 1]; return 1; }
     if (k >= N_SAMPLES && (k - N_SAMPLES) < mv_nhi) { *v = (float)mv_ext_hi[k - N_SAMPLES]; return 1; }
     return 0;

@@ -98,6 +98,7 @@ static uint32_t now_ms; static uint32_t HAL_GetTick(void){return now_ms;}
 static void UartPrint(const char*s){(void)s;}
 #include "state.c"
 static void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n);
+static int SlowExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v80 SLOW edge neighbours: SLOW block not compiled here */
 static void MvFreezeCapture(void); static void MvBuildView(void); static void AutoScale(void);
 /* --- model of the measurement chain (as test_autotb.py) --- */
 static double F=1000, A=3.0, FAST_MAX=2.2e6; static double t_change_ms=-1e9, lastF=-1; static int hist_blind=0;
