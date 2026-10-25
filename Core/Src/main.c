@@ -734,6 +734,8 @@ static void OscSetIndex(int idx)
     if (osc_sidx < 0) OSC_SET(osc_sidx, 0);
 }
 
+static uint8_t osc_auto_stage;      /* defined with the AutoScale state machine below */
+
 static void OscAdjust(int dir)      /* dir = +1 / -1 */
 {
     const char *name = OscSetName();
@@ -748,9 +750,16 @@ static void OscAdjust(int dir)      /* dir = +1 / -1 */
         osc_vdiv_i = OscClampI(osc_vdiv_i + dir, 0, (int)(sizeof(osc_vdivs) / sizeof(float)) - 1);
         volts_per_div = osc_vdivs[osc_vdiv_i];
     } else if (!strcmp(name, "T/DIV")) {
-        osc_tdiv_i = OscClampI(osc_tdiv_i + dir, 0, (int)(sizeof(osc_tdivs_ms) / sizeof(float)) - 1);
+        /* v77: T/DIV หมุนได้เฉพาะในโซนของโหมดปัจจุบัน (FAST = 0..OSC_NT_FAST-1, SLOW = OSC_NT_FAST..OSC_NT-1)
+         * -> ปรับ T/DIV สูง<->ต่ำ ไม่ข้ามเส้น 10 ms เอง โหมด FAST/SLOW จึงคงเดิมตามที่ผู้ใช้ตั้งไว้
+         *    (เปลี่ยนโหมดได้ด้วยคีย์ 'F' / ปุ่ม PB3 / ปุ่มน้ำเงิน PC13 เท่านั้น ซึ่งจะกระโดด T/DIV ไปโซนใหม่ให้) */
+        int in_slow = (osc_tdiv_i >= OSC_NT_FAST);
+        int lo = in_slow ? OSC_NT_FAST : 0;
+        int hi = in_slow ? (OSC_NT - 1) : (OSC_NT_FAST - 1);
+        osc_tdiv_i = OscClampI(osc_tdiv_i + dir, lo, hi);
         /* New timebase takes effect only on the next capture. */
         OSC_SET(osc_auto_tb, 0);            /* manual choice wins until 'z' (AutoScale) re-arms AUTO */
+        osc_auto_stage = 0;                 /* a pending one-shot AutoScale would otherwise overwrite this T/DIV (and flip FAST/SLOW) a few frames later */
     } else if (!strcmp(name, "C1")) {
         osc_c1 = OscClampI(osc_c1 + dir * 5, 0, N_SAMPLES - 1);
     } else if (!strcmp(name, "C2")) {
@@ -2786,6 +2795,12 @@ static void FAST_O2 AdcCaptureFrame(void)
     }
 
     /* --- หาจุด trigger ในข้อมูลดิบ (ระดับ = ค่ากลางของบัฟเฟอร์) แล้วเริ่มวาดที่จุดนั้น --- */
+    /* v78: left margin so MvStoreExt always finds >= 10 real display points before `start`
+     * (filter half-width max = 10). With start = 0 (no trigger / edge found at i=1) mv_nlo was 0, the first `half`
+     * points fell back to one repeated value -> a flat block at a ripple extreme = the spike at the left edge. */
+    uint32_t edge_m = (uint32_t)(10.0f * step + 0.5f) + w + 2u;
+    uint8_t  edge_fit = ((float)edge_m + (float)N_SAMPLES * step + (float)w <= (float)n);
+    uint32_t t_from = edge_fit ? (edge_m + (uint32_t)(2.0f * step + 1.0f) + 1u) : 1u;   /* + lead (below) */
     uint32_t start = 0;
     if (osc_stable && osc_lock_auto) {
         float sum = 0.0f, mid;
@@ -2810,13 +2825,13 @@ static void FAST_O2 AdcCaptureFrame(void)
                 for (uint32_t i = 1; i < lim; i++) {
                     float v = (float)adc_raw_buf[i];
                     if (v > mid + hy) armed = 1;
-                    else if (armed && v < mid) { start = i; break; }
+                    else if (armed && v < mid && i >= t_from) { start = i; break; }   /* v78: not inside the left margin */
                 }
             } else {
                 for (uint32_t i = 1; i < lim; i++) {
                     float v = (float)adc_raw_buf[i];
                     if (v < mid - hy) armed = 1;
-                    else if (armed && v >= mid) { start = i; break; }
+                    else if (armed && v >= mid && i >= t_from) { start = i; break; }   /* v78 */
                 }
             }
         }
@@ -2843,6 +2858,7 @@ static void FAST_O2 AdcCaptureFrame(void)
         uint32_t lead = (uint32_t)(2.0f * step + 1.0f);
         start = (start > lead) ? (start - lead) : 0u;
     }
+    if (edge_fit && start < edge_m) start = edge_m;   /* v78: untriggered / early edge -> keep the left margin */
     dbg_adc_start = start;
 
     for (int i = 0; i < N_SAMPLES; i++) {   /* resample แบบเศษ + boxcar เฉลี่ย w จุด (เริ่มที่จุด trigger) */
