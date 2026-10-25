@@ -1,13 +1,14 @@
 """Host test of the v62 eight-button panel (PB0-3 as v61; PA3/PC0/PC3/PF3 revised). Real HandleButtons/ButtonJustPressed/ButtonRepeat/ButtonRaw/ActIncrease/ActDecrease/ActUp/ActDown/
 ActSelectSetting/ActToggleTrigEdge/OscSetIndex extracted from Core/Src/main.c; GPIO, OscAdjust, MvMove, ActAuto, ActToggleFastSlow, ActAutoMode are recording stubs.
 Not a board test."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import re, subprocess, sys, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_eightbtn'; OUT.mkdir(parents=True, exist_ok=True)
 from rtos_norm import unrtos
 from _unlock import unlock
-src = unrtos(unlock((ROOT/'Core/Src/main.c').read_text()))   # v71: undo the step-3a lock wrappers before the 'unchanged' checks
+src = unrtos(unlock(app_source()))   # v71: undo the step-3a lock wrappers before the 'unchanged' checks
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 def function(name):
     m = re.search(r'^(?:static\s+)?(?:void|int|float|uint8_t|const char\s*\*)\s*'+name+r'\([^;]*?\)\s*\{', nocom, re.M)

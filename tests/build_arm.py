@@ -6,13 +6,13 @@ out=Path.home()/'.hermes/cache/scratch/osc_arm_build';out.mkdir(parents=True,exi
 tools=Path('/Applications/STM32CubeIDE.app/Contents/Eclipse/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.macosaarch64_1.0.0.202602081740/tools/bin')
 gcc=str(tools/'arm-none-eabi-gcc')
 flags=['-mcpu=cortex-m7','-mthumb','-mfpu=fpv5-d16','-mfloat-abi=hard','-std=gnu11','-DDEBUG','-DUSE_HAL_DRIVER','-DSTM32F767xx','-O0','-g3','-ffunction-sections','-fdata-sections','-Wall','-Wextra','--specs=nano.specs']
-incs=['Core/Inc','Core/Inc/ILI9341','Core/Src/ILI9341','Drivers/STM32F7xx_HAL_Driver/Inc','Drivers/STM32F7xx_HAL_Driver/Inc/Legacy','Drivers/CMSIS/Device/ST/STM32F7xx/Include','Drivers/CMSIS/Include','Middlewares/FreeRTOS/Source/include','Middlewares/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1']
+incs=['Core/Inc','Core/Inc/ILI9341','Core/Src/ILI9341','Drivers/STM32F7xx_HAL_Driver/Inc','Drivers/STM32F7xx_HAL_Driver/Inc/Legacy','Drivers/CMSIS/Device/ST/STM32F7xx/Include','Drivers/CMSIS/Include','ThirdParty/FreeRTOS/Source/include','ThirdParty/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1']
 flags += ['-I'+str(root/i) for i in incs]
 sources=(sorted((root/'Core/Src').rglob('*.c'))
          +sorted((root/'Drivers/STM32F7xx_HAL_Driver/Src').glob('*.c'))
-         +sorted((root/'Middlewares/FreeRTOS/Source').glob('*.c'))
-         +[root/'Middlewares/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1/port.c',
-           root/'Middlewares/FreeRTOS/Source/portable/MemMang/heap_4.c']
+         +sorted((root/'ThirdParty/FreeRTOS/Source').glob('*.c'))
+         +[root/'ThirdParty/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1/port.c',
+           root/'ThirdParty/FreeRTOS/Source/portable/MemMang/heap_4.c']
          +sorted((root/'Core/Startup').glob('*.s')))
 def compile(src):
  obj=out/(str(src.relative_to(root)).replace('/','_')+'.o')

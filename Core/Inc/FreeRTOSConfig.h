@@ -1,6 +1,6 @@
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
-/* FreeRTOS config - STM32F767ZI, Step 1 (single task). Hand-vendored, not CubeMX. */
+/* FreeRTOS config - STM32F767ZI: OscTask + InputTask (Core/Src/app). Hand-written, not CubeMX (kernel in ThirdParty/FreeRTOS). */
 #include <stdint.h>
 extern uint32_t SystemCoreClock;
 
@@ -11,7 +11,7 @@ extern uint32_t SystemCoreClock;
 #define configUSE_TIME_SLICING                  1
 #define configMAX_PRIORITIES                    5
 #define configMINIMAL_STACK_SIZE                ( ( uint16_t ) 128 )
-#define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 15 * 1024 ) )   /* tunable later; main task stack (2048 words = 8KB) comes from here too -> see note */
+#define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 24 * 1024 ) )   /* OscTask + InputTask stacks (2 x 2048 words = 16 KB) + idle + TCBs + 2 mutexes */
 #define configMAX_TASK_NAME_LEN                 ( 16 )
 #define configUSE_16_BIT_TICKS                  0
 #define configIDLE_SHOULD_YIELD                 1
@@ -51,6 +51,7 @@ extern uint32_t SystemCoreClock;
 #define INCLUDE_vTaskDelay                  1
 #define INCLUDE_vTaskDelayUntil             1
 #define INCLUDE_xTaskGetSchedulerState      1
+#define INCLUDE_uxTaskGetStackHighWaterMark 1
 
 /* Map port handlers onto the CMSIS vector-table names */
 #define vPortSVCHandler     SVC_Handler

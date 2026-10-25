@@ -1,7 +1,8 @@
 """FreeRTOS refactor step 1 contracts: whole loop body moved verbatim into vMainTask, SysTick shared HAL+FreeRTOS, start order, Slow block unchanged."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 import re, pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-src = (ROOT/'Core/Src/main.c').read_text(encoding='utf-8')
+src = app_source()
 bef = (ROOT.parent/'builds/v65-rtos-step1/main_before.c').read_text(encoding='utf-8')
 it  = (ROOT/'Core/Src/stm32f7xx_it.c').read_text()
 fails = 0

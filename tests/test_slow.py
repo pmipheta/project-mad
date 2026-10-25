@@ -1,11 +1,12 @@
 """Host test of the SLOW history sampler + SLOW display (T/DIV >= 50 ms) extracted from Core/Src/main.c.
 The ADC is modelled as an ideal 12-bit converter; SysTick is called once per simulated ms. Not a board test."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__import__('tempfile').gettempdir()) / 'osc_slow'
 OUT.mkdir(parents=True, exist_ok=True)
-src = (ROOT/'Core/Src/main.c').read_text()
+src = app_source()
 a, b = src.index('SLOW_BEGIN'), src.index('SLOW_END')
 block = src[src.rfind('/*', 0, a):src.index('\n', b)+1]
 (OUT/'slow_extract.c').write_text(block)

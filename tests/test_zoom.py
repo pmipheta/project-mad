@@ -2,6 +2,7 @@
 Re-uses the harness of test_buttons.py (real C of the MOVE / MOVE_DATA blocks, MapToScreen, OscAdjust ... from Core/Src/main.c) like test_realpic.py,
 adds real C of UartPoll, and checks source contracts against builds/v57/main_before.c (= v56): Slow block byte-identical, nothing outside
 move/zoom/draw/uart code changed. Not a board test."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import re, subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
@@ -209,7 +210,7 @@ exec(compile(harness_py, 'zoom_harness', 'exec'), ns)
 # ---- real UartPoll: '+' / '-' are immediate keys, "v +" / "t -" stay line commands --------------------------------------
 from rtos_norm import unrtos
 from _unlock import unlock
-src = unrtos(unlock((ROOT/'Core/Src/main.c').read_text()))
+src = unrtos(unlock(app_source()))
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 def func(t, name):
     m = re.search(r'^static\s+\w+\s+' + name + r'\([^;]*?\)\s*\{', t, re.M); assert m, name

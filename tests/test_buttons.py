@@ -2,12 +2,13 @@
 extracted from Core/Src/main.c (MOVE block, MOVE_DATA block, AUTO_TB block, OscAdjust, OscAutoScale, MapToScreen, ButtonRepeat, UartCommand).
 The measurement chain is MODELLED (as in test_autotb.py): FAST reads >= 39.9 Hz up to a configurable limit, SLOW reads any base with >= 3.1 cycles.
 Not a board test."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import re, subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_buttons'; OUT.mkdir(parents=True, exist_ok=True)
 from _unlock import unlock
-src = unlock((ROOT/'Core/Src/main.c').read_text())
+src = unlock(app_source())
 nocom = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
 
 def block(begin, end):

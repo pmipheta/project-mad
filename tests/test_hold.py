@@ -1,9 +1,10 @@
 """Host test of OscFrameHold (extracted from Core/Src/main.c): which frames are not drawn."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / 'osc_hold'; OUT.mkdir(parents=True, exist_ok=True)
-src = (ROOT/'Core/Src/main.c').read_text()
+src = app_source()
 a, b = src.index('HOLD_BEGIN'), src.index('HOLD_END')
 (OUT/'hold_extract.c').write_text(src[src.rfind('/*', 0, a):src.index('\n', b)+1])
 (OUT/'h.c').write_text(r"""

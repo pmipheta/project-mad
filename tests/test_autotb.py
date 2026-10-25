@@ -1,11 +1,12 @@
 """Closed-loop host test of the AUTO time base (FAST/SLOW switching), extracted from Core/Src/main.c.
 The measurement chain is MODELLED (FAST reads >=39.9 Hz, SLOW needs >=2.1 cycles and f<=Fs/8); not a board test."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__import__('tempfile').gettempdir()) / 'osc_autotb'
 OUT.mkdir(parents=True, exist_ok=True)
-src = (ROOT/'Core/Src/main.c').read_text()
+src = app_source()
 # Host harness is single-threaded: remove Step-3 locking wrappers while
 # retaining the production expressions under test.
 try:

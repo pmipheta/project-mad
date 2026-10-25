@@ -1,10 +1,11 @@
 """Host regression of extracted production C; ADC sine inputs are modeled, not hardware."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import re, subprocess, os
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__import__('tempfile').gettempdir()) / 'osc_regression'
 OUT.mkdir(parents=True, exist_ok=True)
-raw_src = (ROOT/'Core/Src/main.c').read_text()
+raw_src = app_source()
 try:
     import _unlock
     raw_src = _unlock.unlock(raw_src)

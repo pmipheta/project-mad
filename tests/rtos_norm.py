@@ -11,6 +11,9 @@ def unrtos(t):
     t = t[:m.start()] + t[m.end():]
     start = ('    xTaskCreate(vMainTask, "Main", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);\n'
              '    vTaskStartScheduler();   /* never returns */\n    for (;;) { }\n')
+    if start not in t:      # since the module split the task start sits in AppStart() (app_main.c), without the for (;;)
+        start = ('    xTaskCreate(vMainTask, "Main", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);\n'
+                 '    vTaskStartScheduler();   /* never returns */\n')
     assert start in t
     t = t.replace(start, '    while (1)\n    {\n' + body + '    }\n', 1)
     t = t.replace('    DrawTopPanel();\n\n    /* USER CODE END 2 */', '    DrawTopPanel();\n\n    uint32_t last_frame_tick  = 0;\n    uint32_t last_header_tick = 0;\n\n    /* USER CODE END 2 */', 1)

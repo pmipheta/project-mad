@@ -1,9 +1,10 @@
 """v60 SET-selection blink: contracts on DrawTopPanel + C model of HdrText/colour expressions extracted from main.c. Host test, not a board test."""
+from app_src import source as app_source   # the app modules as one text (see app_src.py)
 from pathlib import Path
 import re, subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir())/'osc_blink'; OUT.mkdir(parents=True, exist_ok=True)
-src = (ROOT/'Core/Src/main.c').read_text()
+src = app_source()
 fails = 0
 def chk(c, m):
     global fails
