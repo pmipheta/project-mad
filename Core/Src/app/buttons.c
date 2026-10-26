@@ -78,14 +78,13 @@ static uint8_t ButtonRaw(const Button *b)
 /* --------------------------------------------------------------------------
  * HandleButtons
  * Call this every loop iteration (before frame logic).
- * Roles: HOLD pin = FREEZE | SET pin = AUTO | UP pin = UP/LEFT | DOWN pin = DOWN/RIGHT | PC13 = FAST<>SLOW (short) / AUTO FAST/SLOW (long)
+ * Roles: HOLD pin = FREEZE | SET pin = AUTO | UP pin = INCREASE | DOWN pin = DECREASE | PC13 = FAST<>SLOW (short) / AUTO FAST/SLOW (long)
  * -------------------------------------------------------------------------- */
 void HandleButtons(uint32_t now)
 {
     int n;
-    MvSync();
 
-    /* v61: PB0 = INCREASE, PB1 = DECREASE (hold-repeat as before; OscAdjust only, never move/zoom) */
+    /* v61: PB0 = INCREASE, PB1 = DECREASE (hold-repeat; OscAdjust only) */
     btn_rep_ms = OscCursorSelected() ? BTN_CUR_REPEAT_MS : BTN_REPEAT_MS;   /* v85: C1/C2 glide; other settings keep 60 ms */
     if ((n = ButtonRepeat(&btn_up,   ButtonRaw(&btn_up),   now)) > 0) ActIncrease(n);
     if ((n = ButtonRepeat(&btn_down, ButtonRaw(&btn_down), now)) > 0) ActDecrease(n);
@@ -105,7 +104,7 @@ void HandleButtons(uint32_t now)
     if (ButtonJustPressed(&btn_tdiv, now)) ActSelectSetting(strcmp(OscSetName(), "FILTER") == 0 ? "TRIG" : "FILTER");
     (void)ActToggleTrigEdge;
 
-    /* v64: PF3 = true FREEZE toggle (ActFreeze, same as UART 'h') */
+    /* v64: PF3 = true FREEZE toggle (ActFreeze) */
     if (ButtonJustPressed(&btn_trig, now)) ActFreeze();
 
     /* v62: PC3 = short (on release) FREEZE | held BTN_CURSOR_LONG_MS (fires once) toggle C1<->C2 cursor (only while frozen). Same pattern as PB3 below. */

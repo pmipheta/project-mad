@@ -4,10 +4,10 @@
 
 #include "app/app_config.h"
 
-/* Tasks: InputTask polls buttons + UART and outranks OscTask, so a press is handled as soon as OscTask finishes its pass. */
+/* Tasks: InputTask polls the buttons and outranks OscTask, so a press is handled as soon as OscTask finishes its pass. */
 #define OSC_TASK_STACK    2048                    /* words */
 #define OSC_TASK_PRIO     (tskIDLE_PRIORITY + 1)
-#define INPUT_TASK_STACK  2048                    /* words: button actions reach MvBuildView/MvBuildZoom, commands reach snprintf */
+#define INPUT_TASK_STACK  2048                    /* words */
 #define INPUT_TASK_PRIO   (tskIDLE_PRIORITY + 2)
 #define INPUT_POLL_MS     1                       /* = HAL tick: debounce/hold/repeat times are seen as with the old busy loop */
 

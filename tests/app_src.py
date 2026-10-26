@@ -5,8 +5,8 @@ back where it was, and gives 'static' back to the file-scope definitions that on
 import pathlib, re
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INC, SRC = ROOT/'Core/Inc/app', ROOT/'Core/Src/app'
-MODULES = ['osc_state', 'uart_console', 'osc_process', 'osc_sim', 'osc_settings', 'osc_timebase', 'osc_actions',
-           'display', 'buttons', 'adc_capture', 'slow_mode', 'move_view', 'osc_task', 'input_task', 'app_main']
+MODULES = ['osc_state', 'osc_process', 'osc_settings', 'osc_timebase', 'osc_actions',
+           'display', 'buttons', 'adc_capture', 'slow_mode', 'ext_points', 'osc_task', 'input_task', 'app_main']
 JOINED = MODULES[:-1]       # app_main.c is not joined: its AppInit()/AppStart() bodies are inlined into main() (see _main)
 # already global (no 'static') before the split: SWD-readable debug variables, the SysTick hook, the shared results
 PUBLIC = {'OscSlowTick', 'new_frame_ready', 'osc_meas', 'raw_samples', 'adc_raw_buf', 'prof_us', 'AppInit', 'AppStart',

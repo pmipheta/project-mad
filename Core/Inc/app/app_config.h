@@ -9,7 +9,6 @@
 #include "rng.h"
 #include "spi.h"
 #include "tim.h"
-#include "usart.h"
 #include "gpio.h"
 #include "ILI9341_STM32_Driver.h"
 #include "ILI9341_GFX.h"
@@ -22,40 +21,13 @@
 #include <string.h>
 
 /* ============================================================================
- * main.c  —  Oscilloscope Display Module  (Full Feature Mockup)
- *
  * Board   : STM32F767ZIT6 (Nucleo-F767ZI)
- * Display : ILI9341 320x240 TFT via SPI5
- * Driver  : martnak/STM32-ILI9341
- *
- * SCREEN LAYOUT (landscape 320x240)
- * ┌────────────────────────────────────────────────────────────────────┐
- * │ Row1 y=1  : [V/div] [T/div] [TrigMode] [Status]          (size 1) │
- * │ Row2 y=10 : [Vpp]   [Freq]  [Vmax]    [Vmin]   [RMS]    (size 1) │
- * │ ────────────────────────────── y=18 separator ──────────────────── │
- * │ y=19..239 : Waveform area (221 px, ~5.5 grid divisions)           │
- * └────────────────────────────────────────────────────────────────────┘
- *
- * BUTTONS  (configure the 4 macros below to match actual wiring)
- *   BTN_UP   — V/div increase (short) | T/div increase (after SET toggle)
- *   BTN_DOWN — V/div decrease
- *   BTN_HOLD — freeze / un-freeze  |  reset SINGLE capture
- *   BTN_SET  — short: cycle trigger mode (AUTO→SINGLE→NORM)
- *              long (2 s): Auto Scale
- *
- * MERGE WITH SAMPLING TEAMMATE
- *   1. Remove GenerateFakeSineWave() and its call inside while(1).
- *   2. Teammate fills raw_samples[N_SAMPLES] (0-4095) and sets new_frame_ready=1.
- *   3. Teammate fills osc_meas (vmax, vmin, vpp, vrms, freq).
- *   4. Integration point is clearly marked in the while(1) block.
+ * Display : ILI9341 320x240 TFT via SPI5 (driver martnak/STM32-ILI9341)
+ * Input   : ADC1 PA0 (FAST, burst DMA) and ADC3 (SLOW, 1 kHz history); see DEVELOPER_GUIDE.md
+ * Controls: eight front-panel buttons + PC13 (pin map below); there is no serial console.
  * ============================================================================
  */
 
-/* ===== p30: อินพุตจริงจากเครื่องกำเนิดสัญญาณ (ADC1 = PA0) ==================
- *   1 = ใช้ข้อมูลจริงจาก ADC   |   0 = ใช้ simulator เดิม (GenFrame ฯลฯ)
- *   สลับค่าเดียวนี้เพื่อกลับไปใช้ simulator ได้ทันที (โค้ดเดิมไม่ถูกแตะ)
- * ========================================================================== */
-#define ADC_INPUT_ENABLE   1
 #define ADC_RAW_MAX        65520u  /* <=16-bit NDTR; whole 32-byte cache lines */
 #define OSC_NT             18       /* number of T/DIV (12 FAST + 6 SLOW) */
 #define OSC_VDIV_DEF      12       /* index of 1.0 V/div in osc_vdivs[] */
@@ -172,27 +144,12 @@ typedef struct {
     uint8_t       low_pending;      /* v54: 1 = pin reads released, waiting BTN_REL_MS to be sure */
 } Button;
 
-/* ==========================================================================
- * INPUT ทาง USART3 (ใช้แทนปุ่มจริงที่ยังไม่ต่อ) + FUNCTION GENERATOR
- *   ทำตาม STM32 Oscilloscope Simulator (matplotlib) ฝั่ง "input" ทั้งหมด:
- *     SET  = วน setting ที่กำลังปรับ  (FILTER -> TRIG -> V/DIV -> T/DIV,
- *                                      ตอน HOLD: C1 -> C2 -> V/DIV)
- *     UP/DOWN = ปรับ setting ปัจจุบัน
- *     HOLD = freeze/ปลด freeze (ตอน HOLD จะโชว์ cursor C1/C2 + dV/dt)
- *     generator: wave / freq / amp / dc / noise (แทน sliders)
- *   คีย์: s=SET  u=UP  d=DOWN  h=HOLD  ?=แสดงสถานะ  g=สุ่มข้อมูลใหม่
- *         w[f|0..3]  f<Hz>  a<V>  o<V>  n<V>  v[+|-]  t[+|-]  c1<n> c2<n>  cal<0|1>
- * ========================================================================== */
-#define OSC_H_DIVS      10          /* จำนวนช่องแนวนอน (เหมือน simulator)      */
-#define SIM_STREAM_MODE  2          /* 2 = function generator (ตาม simulator) | 1 = stream | 0 = sine เดิม */
+/* settings menu + auto scale */
+#define OSC_H_DIVS      10          /* จำนวนช่องแนวนอน                        */
 #define OSC_V_DC_DIVS   2.0f        /* v90 auto scale, DC: the trace starts at 0 V on the centre line -> its peak may reach this many divisions from it */
 #define OSC_V_FILL_DIVS 4.0f        /* v54 auto scale: Vpp may span at most this many divisions (the visible area is ~5.3 div: 2.2 above, 3 below the centre) */
 #define OSC_FIT_CYCLES  2.5f        /* auto scale: อยากเห็นกี่คาบบนจอ (10 ช่อง) */
 #define OSC_SET_COUNT   4           /* FILTER / TRIG / V/DIV / T/DIV            */
 #define OSC_HOLD_COUNT  3           /* C1 / C2 / V/DIV (ตอน HOLD)               */
-#define UART_RX_SIZE    96
-#define UART_IDLE_MS    250         /* หยุดพิมพ์เกินเท่านี้ = ถือว่าเป็นคำสั่งแบบเดี่ยว (ไม่ต้อง Enter) */
-#define UART_DROP_MS    4000        /* บรรทัดค้าง (ไม่มี \r) เกินเท่านี้ = ทิ้ง */
-#define OSC_PUSH        8           /* sample ใหม่ต่อเฟรม (คุมความเร็วไถล) */
 
 #endif /* APP_APP_CONFIG_H */

@@ -29,7 +29,6 @@ pre = '''#include <stdint.h>
 #define OSC_VDIV_DEF 3
 #define OSC_EXT_STUB 1
 static int OscExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v76: no outside points in this harness -> fallback edge rule */
-#define ADC_INPUT_ENABLE 1
 #define N_SAMPLES 240
 #define ADC_PRE_POINTS 200
 #define ADC_VREF 3.3f
@@ -88,21 +87,19 @@ static float AdcRateHz(int l);static uint8_t AdcSetRateLevel(int l);
 #define ATB_FAST_TO_SLOW_HZ 70.0f
 #define ATB_SLOW_TO_FAST_HZ 90.0f
 #define ATB_FAST_CYC 6.0f
-#define MV_EXT_MAX 256
 #define AS_MIN_VPP 0.05f
 #define AS_MIN_CYC 3.2f
 #define OSC_V_FILL_DIVS 4.0f
 #define OSC_V_DC_DIVS 2.0f
 #define OSC_FIT_CYCLES 2.5f
 #define FAST_O2_UNUSED
-static void MvStoreExt(uint32_t start,float step,uint32_t w,uint32_t n);static int OscAutoPickTdiv(float f);static void OscAutoApply(float vpp,int ti);static int AtbPickFast(float f);static int AtbPickSlow(float f);
-static uint16_t mv_ext_lo[MV_EXT_MAX],mv_ext_hi[MV_EXT_MAX];static int mv_nlo,mv_nhi,mv_y_steps,mv_view_on; static uint8_t mv_zoom_y=1;static float mv_view_v[240];
+static void MvStoreExt(uint32_t start,float step,uint32_t w,uint32_t n){(void)start;(void)step;(void)w;(void)n;}   /* no outside points here (OscExtPoint stub) */
+static int OscAutoPickTdiv(float f);static void OscAutoApply(float vpp,int ti);static int AtbPickFast(float f);static int AtbPickSlow(float f);
 static uint8_t osc_auto_stage,osc_auto_tries,hold_active,osc_auto_tb=1;
 static volatile uint8_t slow_active;
 static float dbg_auto_fsel;
 static int osc_vdiv_i;
 static const float osc_vdivs[]={.1f,.2f,.5f,1,2};
-static void UartPrint(const char*s){(void)s;}
 static uint8_t AdcCaptureRaw(uint32_t n,uint32_t *us);
 static uint8_t AdcCaptureStart(uint32_t n,uint32_t*t0);static uint8_t AdcCaptureCollect(uint32_t n,uint32_t t0,uint32_t*t_us);static void AdcAbortPending(void);
 '''
@@ -119,7 +116,7 @@ static uint8_t AdcCaptureStart(uint32_t n,uint32_t*t0){uint32_t u;start_calls++;
 static uint8_t AdcCaptureCollect(uint32_t n,uint32_t t0,uint32_t*t_us){(void)t0;*t_us=(uint32_t)(n/0.8f);return 1;}
 static void AdcAbortPending(void){if(adc_pend){adc_pend=0;abort_calls++;}}
 '''
-body='\n'.join(function(x) for x in ['OscFiltWin','OscProcessFrame','OscMeasureFrame','AdcRawFrequency','AdcPlanFrame','AdcPreFor','AdcPrestart','AdcCaptureFrame','MapToScreen','OscAutoScale','OscAutoScaleStep','AutoScale','MvStoreExt','AtbPickFast','AtbPickSlow','OscAutoPickTdiv','OscAutoApply'])
+body='\n'.join(function(x) for x in ['OscFiltWin','OscProcessFrame','OscMeasureFrame','AdcRawFrequency','AdcPlanFrame','AdcPreFor','AdcPrestart','AdcCaptureFrame','MapToScreen','OscAutoScale','OscAutoScaleStep','AutoScale','AtbPickFast','AtbPickSlow','OscAutoPickTdiv','OscAutoApply'])
 # State-machine contract: both entry points must use the same implementation,
 # never consume held/failed captures, and never derive frequency from pixels.
 auto = function('OscAutoScaleStep')

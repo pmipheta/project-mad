@@ -1,5 +1,5 @@
-"""Host test of the v54 button/key roles (FREEZE, AUTO, UP/LEFT, DOWN/RIGHT, MOVE:Y/X, F/A) and the new AUTO scale,
-extracted from Core/Src/main.c (MOVE block, MOVE_DATA block, AUTO_TB block, OscAdjust, OscAutoScale, MapToScreen, ButtonRepeat, UartCommand).
+"""Host test of the button roles (FREEZE, AUTO, INCREASE/DECREASE, FAST/SLOW, auto FAST/SLOW) and the AUTO scale,
+extracted from the app modules (ACTIONS block, EXT_POINTS block, AUTO_TB block, OscAdjust, OscAutoScale, MapToScreen, ButtonRepeat).
 The measurement chain is MODELLED (as in test_autotb.py): FAST reads >= 39.9 Hz up to a configurable limit, SLOW reads any base with >= 3.1 cycles.
 Not a board test."""
 from app_src import source as app_source   # the app modules as one text (see app_src.py)
@@ -24,33 +24,23 @@ def function(name):
 def macro(name):
     return re.search(r'^#define '+name+r'\s+([^/\n]+)', nocom, re.M)[1].strip()
 
-pv_a = src.index('/* --- v54: MOVE (only acts while frozen)')
-pv_b = src.index('static float    mv_view_v[N_SAMPLES];') + len('static float    mv_view_v[N_SAMPLES];')
-mv_state = src[pv_a:pv_b]
 set_a = src.index('static int OscSetCount(void)')
 set_b = src.index('static void OscSetValueText')
 set_menu = src[set_a:set_b] + function('OscAdjust')            # OscSetCount / OscSetName / OscClampI / OscClampF + OscAdjust
 (OUT/'atb.c').write_text(block('AUTO_TB_BEGIN', 'AUTO_TB_END'))
-(OUT/'blockA.c').write_text(block('MOVE_BEGIN', 'MOVE_END'))
-(OUT/'blockB.c').write_text(block('MOVE_DATA_BEGIN', 'MOVE_DATA_END'))
-(OUT/'state.c').write_text(mv_state)
+(OUT/'blockA.c').write_text(block('ACTIONS_BEGIN', 'ACTIONS_END'))
+(OUT/'blockB.c').write_text(block('EXT_POINTS_BEGIN', 'EXT_POINTS_END'))
 (OUT/'menu.c').write_text(set_menu)
 (OUT/'funcs.c').write_text('\n'.join(function(x) for x in ['OscAutoScale', 'AutoScale', 'MapToScreen', 'ButtonRepeat']))
-uc = function('UartCommand')
-(OUT/'uart.c').write_text(uc)
 
 # ---- contracts on the text of main.c ---------------------------------------------------------------------------------
 before = ROOT.parent/'builds/v54/main_before.c'
 def slow_text(t): return t[t.index('SLOW_BEGIN ='):t.index('SLOW_END =')]
 contracts = [
  ('Slow block byte-identical to v53', (not before.exists()) or slow_text(src) == slow_text(before.read_text())),
- ("UART 'F' = ActToggleFastSlow, 'f' still generator frequency", "case 'F': ActToggleFastSlow();" in src and "case 'f': gen_freq" in src),
- ("UART 'A' = ActAutoMode, 'a' still generator amplitude", "case 'A': ActAutoMode();" in src and "case 'a': gen_amp" in src),
- ('UART x / 0 / h / z / u / d map to Act*', all(t in src for t in ["case 'x': ActToggleMoveAxis();", "case '0': ActMoveCenter();", "ActFreeze(); break;", "case 'z': case 'Z': ActAuto();", "else ActUp(1);", "case 'd': ActDown(1);"])),
- ('x F A 0 act without Enter', 'strchr("sdhg?zxFA0", c)' in src),
- ('buttons call the same Act* (v61: physical +/- = ActIncrease/ActDecrease)', all(t in src for t in ['ActIncrease(n)', 'ActDecrease(n)', 'ActFreeze();', 'ActAuto();', 'ActAutoMode();', 'ActToggleFastSlow();'])),
+ ('buttons call the Act* actions (v61: physical +/- = ActIncrease/ActDecrease)', all(t in src for t in ['ActIncrease(n)', 'ActDecrease(n)', 'ActFreeze();', 'ActAuto();', 'ActAutoMode();', 'ActToggleFastSlow();'])),
  ('pin defines kept (TODO pins)', all(t in src for t in ['#define BTN_UP_PIN      GPIO_PIN_0', '#define BTN_DOWN_PIN    GPIO_PIN_1', '#define BTN_HOLD_PIN    GPIO_PIN_2', '#define BTN_SET_PIN     GPIO_PIN_3'])),
- ('old SET behaviour kept on UART s', "case 's': OscSetIndex(osc_sidx + 1); break;" in src),
+ ('v97: no UART console, no MOVE/ZOOM, no simulator left in the app', not re.search(r'Uart|USART|huart|mv_view|mv_zoom|mv_y_steps|ActZoom|ActUp|ActDown|GenFrame|ADC_INPUT_ENABLE', src)),
 ]
 cfail = sum(not ok for _, ok in contracts)
 for n, ok in contracts: print(('PASS ' if ok else 'FAIL ') + n)
@@ -61,7 +51,6 @@ harness = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#define ADC_INPUT_ENABLE 1
 #define N_SAMPLES 240
 #define SCREEN_W 320   /* v85: C1/C2 are LCD x positions */
 #define ADC_VREF 3.3f
@@ -103,12 +92,10 @@ static uint16_t osc_env_lo_ct[N_SAMPLES], osc_env_hi_ct[N_SAMPLES]; static uint8
 static uint16_t adc_raw_buf[ADC_RAW_MAX];
 static volatile uint16_t slow_hist[SLOW_HIST_N]; static volatile uint32_t slow_last_t, slow_valid_cnt, slow_period_us = 2083;
 static uint32_t now_ms; static uint32_t HAL_GetTick(void){return now_ms;}
-static void UartPrint(const char*s){(void)s;}
-#include "state.c"
 static void MvStoreExt(uint32_t start, float step, uint32_t w, uint32_t n);
 static int SlowExtPoint(int k, float *v){ (void)k; (void)v; return 0; }   /* v80 SLOW edge neighbours: SLOW block not compiled here */
 static int OscFiltWin(void){ int w = (osc_fwin < 1) ? 1 : osc_fwin; if ((w % 2) == 0) w++; return w; }   /* v82: no frequency cap here (test_edge_filter covers it) */
-static void MvFreezeCapture(void); static void MvBuildView(void); static void AutoScale(void);
+static void AutoScale(void);
 /* --- model of the measurement chain (as test_autotb.py) --- */
 static double F=1000, A=3.0, FAST_MAX=2.2e6; static double t_change_ms=-1e9, lastF=-1; static int hist_blind=0;
 static float SlowProbeFreq(int ti){ double t=osc_tdivs_ms[ti], fs=24000.0/t, cyc=F*t*0.01; if (hist_blind||A<0.05||F>400.0) return 0.0f;
@@ -135,7 +122,7 @@ static void measure(void){
 static void frame(void){ now_ms+=100; if(F!=lastF){ lastF=F; t_change_ms=now_ms; } measure(); if(osc_auto_stage) OscAutoScaleStep(); OscAutoTimebase(); new_frame_ready=0; }
 static int failures;
 static void check(const char*n,int ok){ printf("%s %s\n",ok?"PASS":"FAIL",n); if(!ok)failures++; }
-static void fresh(void){ hold_active=0; mv_prev_hold=0; mv_y_steps=0; mv_x_pts=0; mv_view_on=0; mv_x_min=mv_x_max=0; mv_axis_x=0; osc_sidx=0; osc_auto_tb=1; osc_auto_stage=0; osc_auto_tries=0;
+static void fresh(void){ hold_active=0; osc_sidx=0; osc_auto_tb=1; osc_auto_stage=0; osc_auto_tries=0;
   osc_tdiv_i=8; osc_vdiv_i=OSC_VDIV_DEF; volts_per_div=1.0f; slow_active=0; atb_t_switch=now_ms; atb_t_bad=0; atb_t_probe=0; atb_t_hold=0; atb_t_unread=0; atb_t_flat=0; }
 
 /* ---- auto scale: run the real flow until it finishes, then 12 s of the auto time base to prove they do not fight ---- */
@@ -156,78 +143,33 @@ static void autoscale_case(const char *name, double f, double a, int want_vi, in
 
 int main(void){
   char nm[200];
-  /* ---- 1. move ignored when not frozen; old UP/DOWN job kept ---- */
+  /* ---- 1. +/- adjust the selected setting, running or frozen ---- */
   fresh(); osc_sidx=2;                                             /* V/DIV selected */
-  ActUp(1); check("not frozen: UP adjusts the selected setting (V/DIV 1.0 -> 2.0)", osc_vdiv_i==13 && mv_y_steps==0 && mv_x_pts==0);
-  ActDown(1); ActDown(1); check("not frozen: DOWN adjusts it back, move offsets stay 0", osc_vdiv_i==11 && mv_y_steps==0 && mv_x_pts==0);
-  mv_axis_x=1; ActUp(3); check("not frozen, MOVE:X selected: still no move", mv_x_pts==0 && mv_y_steps==0); mv_axis_x=0;
-
-  /* ---- 2. frozen: Y move, clamp +-4 div ---- */
+  ActIncrease(1); check("running: + adjusts the selected setting (V/DIV 1.0 -> 2.0)", osc_vdiv_i==13);
+  ActDecrease(1); ActDecrease(1); check("running: - adjusts it back", osc_vdiv_i==11);
   fresh(); ActFreeze(); check("ActFreeze freezes", hold_active==1 && osc_sidx==0);
-  ActUp(1); check("frozen MOVE:Y: UP = +0.1 div", mv_y_steps==1);
-  for(int i=0;i<100;i++) ActUp(1); check("Y clamp at +4.0 div (40 steps)", mv_y_steps==40);
-  for(int i=0;i<200;i++) ActDown(1); check("Y clamp at -4.0 div", mv_y_steps==-40);
-  mv_y_steps=0; ActUp(3); check("held 3x step = 0.3 div", mv_y_steps==3);
-  { float vpp_before=osc_meas.vpp, f_before=osc_meas.freq; osc_meas.vpp=2.5f; osc_meas.freq=1234.0f; vpp_before=osc_meas.vpp; f_before=osc_meas.freq;
-    ActUp(5); ActDown(2); check("numbers (Vpp/F) untouched by moving", osc_meas.vpp==vpp_before && osc_meas.freq==f_before); }
-  /* drawing: offset only at draw time */
-  for(int i=0;i<N_SAMPLES;i++){ osc_v[i]=0.0f; } mv_y_steps=0; MapToScreen(0); int y0=new_y[10];
-  mv_y_steps=10; MapToScreen(0); check("MapToScreen: +1.0 div moves the trace up 40 px", y0==120 && new_y[10]==80);
-  mv_y_steps=-40; MapToScreen(0); check("MapToScreen: -4 div clamped to the bottom of the screen", new_y[10]==SCREEN_H-1);
-  mv_y_steps=40; MapToScreen(0); check("MapToScreen: +4 div clamped to the waveform area", new_y[10]==WAVEFORM_TOP);
-  mv_y_steps=0; MapToScreen(0); check("offset 0 = v53 mapping", new_y[10]==120);
+  osc_sidx=2; ActIncrease(1); check("frozen: + adjusts the selected hold setting (V/DIV)", osc_vdiv_i==13 && hold_active==1);
+  { float vpp_before, f_before; osc_meas.vpp=2.5f; osc_meas.freq=1234.0f; vpp_before=osc_meas.vpp; f_before=osc_meas.freq;
+    osc_sidx=0; ActIncrease(5); ActDecrease(2); check("numbers (Vpp/F) untouched by +/-", osc_meas.vpp==vpp_before && osc_meas.freq==f_before); }
+  ActFreeze(); check("FREEZE again unfreezes", hold_active==0);
+  fresh(); for(int i=0;i<N_SAMPLES;i++){ osc_v[i]=0.0f; } MapToScreen(0); check("MapToScreen: 0 V on the centre line", new_y[10]==120);
+  for(int i=0;i<N_SAMPLES;i++){ osc_v[i]=1.0f; } MapToScreen(0); check("MapToScreen: +1 V at 1 V/div = 40 px up", new_y[10]==80);
+  for(int i=0;i<N_SAMPLES;i++){ osc_v[i]=-9.0f; } MapToScreen(0); check("MapToScreen: clamped to the bottom of the screen", new_y[10]==SCREEN_H-1);
+  for(int i=0;i<N_SAMPLES;i++){ osc_v[i]=9.0f; } MapToScreen(0); check("MapToScreen: clamped to the waveform area", new_y[10]==WAVEFORM_TOP);
+  fresh(); ActFreeze(); ActAuto(); check("AUTO while frozen: unfreezes, auto-scale armed", hold_active==0 && osc_auto_stage==1);
 
-  /* ---- 3. reset: unfreeze, '0', AUTO ---- */
-  fresh(); ActFreeze(); mv_y_steps=17; mv_x_pts=0; ActMoveCenter(); check("'0' recenters", mv_y_steps==0 && mv_x_pts==0 && hold_active==1);
-  mv_y_steps=-12; ActFreeze(); check("unfreeze resets offsets", hold_active==0 && mv_y_steps==0 && mv_x_pts==0 && mv_view_on==0);
-  ActFreeze(); mv_y_steps=9; ActAuto(); check("AUTO while frozen: unfreezes, offsets 0, auto-scale armed", hold_active==0 && mv_y_steps==0 && osc_auto_stage==1);
-  fresh(); hold_active=1; mv_y_steps=5; MvSync(); /* freeze not made by a key (e.g. SINGLE trigger) */ mv_y_steps=7; hold_active=0; MvSync(); check("freeze made elsewhere (SINGLE): unfreeze still resets", mv_y_steps==0);
-
-  /* ---- 4. toggle axis ---- */
-  fresh(); check("power-on axis is Y", mv_axis_x==0); ActToggleMoveAxis(); check("x -> MOVE:X", mv_axis_x==1); ActToggleMoveAxis(); check("x -> MOVE:Y", mv_axis_x==0);
-
-  /* ---- 5. X move FAST: clamp to the captured data ---- */
-  { const uint32_t w=2, pre=100; const float step=2.0f; const uint32_t start=0, n=(uint32_t)((N_SAMPLES+pre)*step)+w+2u;
+  /* ---- 2. FAST frame: the display points just outside the window are kept for the edge filter ---- */
+  { const uint32_t w=2, pre=100; const float step=2.0f; const uint32_t n=(uint32_t)((N_SAMPLES+pre)*step)+w+2u;
     for(uint32_t j=0;j<n;j++) adc_raw_buf[j]=(uint16_t)(1000+ (j%3000));
-    for(int i=0;i<N_SAMPLES;i++){ uint32_t c=(uint32_t)(i*step+0.5f); uint32_t lo=c-(w-1)/2; uint32_t acc=0; for(uint32_t q=0;q<w;q++)acc+=adc_raw_buf[lo+q]; raw_samples[i]=(int16_t)(acc/w); }
-    MvStoreExt(start, step, w, n);
+    MvStoreExt(0, step, w, n);
     snprintf(nm,sizeof nm,"FAST ROLL capture (start 0): %d points exist after the window, %d before",mv_nhi,mv_nlo); check(nm, mv_nhi>=pre-2 && mv_nhi<=pre+3 && mv_nlo==0);
-    fresh(); ActFreeze(); ActToggleMoveAxis();
-    ActUp(1); check("X: LEFT at the start of the data does nothing (no earlier data)", mv_x_pts==0 && mv_view_on==0);
-    ActDown(1); check("X: RIGHT = +1/40 screen (6 points)", mv_x_pts==6 && mv_view_on==1);
-    { float k=3.3f/4095.0f; float exp=((float)adc_raw_buf[(uint32_t)(6*step+0.5f)]+ (float)adc_raw_buf[(uint32_t)(6*step+0.5f)-0]) ; (void)exp; (void)k;
-      /* the panned point i is the boxcar at raw index (i+6)*step: compare the value in counts */
-      float cnt_view = mv_view_v[100]/k + osc_offset_ct; /* filter window 5: average of 5 neighbours of point 106 */
-      float acc=0; for(int j=-2;j<=2;j++){ int kk=100+j+6; uint32_t c=(uint32_t)(kk*step+0.5f); uint32_t lo=c-(w-1)/2; uint32_t a2=0; for(uint32_t q=0;q<w;q++)a2+=adc_raw_buf[lo+q]; acc+=(float)(a2/w); }
-      snprintf(nm,sizeof nm,"X: panned view holds the later raw data (view %.1f counts, expected %.1f)",cnt_view,acc/5.0f); check(nm, fabsf(cnt_view-acc/5.0f)<1.0f); }
-    for(int i=0;i<100;i++) ActDown(1); snprintf(nm,sizeof nm,"X clamp right at the last captured point (%d, nhi=%d)",mv_x_pts,mv_nhi); check(nm, mv_x_pts==mv_nhi);
-    for(int i=0;i<100;i++) ActUp(1); check("X clamp left back at 0", mv_x_pts==0 && mv_view_on==0);
-    ActDown(2); ActFreeze(); check("unfreeze resets X pan", mv_x_pts==0 && mv_view_on==0);
-    /* data on both sides (trigger-locked capture, start > 0) */
-    for(int i=0;i<N_SAMPLES;i++){ uint32_t c=100+(uint32_t)(i*step+0.5f); uint32_t lo=c-(w-1)/2; uint32_t acc=0; for(uint32_t q=0;q<w;q++)acc+=adc_raw_buf[lo+q]; raw_samples[i]=(int16_t)(acc/w); }
     MvStoreExt(100, step, w, n);
-    fresh(); ActFreeze(); ActToggleMoveAxis(); for(int i=0;i<100;i++) ActUp(1);
-    snprintf(nm,sizeof nm,"locked capture (start 100): LEFT clamps at -%d points = the data before the window",mv_nlo); check(nm, mv_x_pts==-mv_nlo && mv_nlo>=45 && mv_nlo<=50);
-    { int bad=0; float k=3.3f/4095.0f; osc_fwin=1; MvBuildView(); for(int i=0;i<N_SAMPLES;i++){ float cn=mv_view_v[i]/k+osc_offset_ct; if(cn<999.0f||cn>4100.0f) bad++; } osc_fwin=5;
-      check("panned view at the left limit holds only captured counts (no garbage)", bad==0); }
-    /* no extra data at all */
-    { const uint32_t n2=(uint32_t)(N_SAMPLES*step)+w-1u;   /* data ends exactly with the window */ for(int i=0;i<N_SAMPLES;i++) raw_samples[i]=2000; MvStoreExt(0, step, w, n2);
-      fresh(); ActFreeze(); ActToggleMoveAxis(); ActUp(5); ActDown(5);
-      snprintf(nm,sizeof nm,"capture without extra data (nlo %d, nhi %d): X move does nothing",mv_nlo,mv_nhi); check(nm, mv_x_pts==0 && mv_view_on==0 && mv_x_min==0 && mv_x_max==0); }
-  }
-  /* ---- 6. X move SLOW: pan back into the 8 s history of the freeze ---- */
-  { fresh(); slow_active=1; osc_tdiv_i=16; slow_period_us=2083; slow_last_t=20000; slow_valid_cnt=5000;       /* only 5000 ms of real history */
-    for(uint32_t t=0;t<SLOW_HIST_N;t++) slow_hist[t]=7777;                                                       /* 7777 = "never recorded" */
-    for(uint32_t t=slow_last_t-4999;t<=slow_last_t;t++) slow_hist[t&(SLOW_HIST_N-1)]=(uint16_t)(1000+(t%2000));
-    for(int i=0;i<N_SAMPLES;i++) raw_samples[i]=2048;
-    ActFreeze(); ActToggleMoveAxis();
-    snprintf(nm,sizeof nm,"SLOW freeze: history behind the window allows %d points of LEFT",-mv_x_min); check(nm, mv_x_min<0 && mv_x_max==0);
-    ActDown(3); check("SLOW: RIGHT of the newest data does nothing", mv_x_pts==0);
-    for(int i=0;i<400;i++) ActUp(1);
-    check("SLOW: LEFT clamps at the oldest recorded data", mv_x_pts==mv_x_min && mv_view_on==1);
-    { int bad=0; osc_fwin=1; MvBuildView(); for(int i=0;i<N_SAMPLES;i++){ float cn=mv_view_v[i]/(3.3f/4095.0f)+osc_offset_ct; if(cn>3000.0f) bad++; } osc_fwin=5; check("SLOW: at the left limit no unrecorded (7777) data is shown", bad==0); }
-    for(uint32_t t=0;t<SLOW_HIST_N;t++) slow_hist[t]=5;                                                          /* the live history moves on while frozen */
-    { int p=mv_x_pts; ActDown(1); check("SLOW: pan uses the copy taken at the freeze, not the live history", mv_x_pts==p+6); osc_fwin=1; MvBuildView(); int bad=0; for(int i=0;i<N_SAMPLES;i++){ float cn=mv_view_v[i]/(3.3f/4095.0f)+osc_offset_ct; if(cn<900.0f) bad++; } osc_fwin=5; check("SLOW: ...values still those of the freeze", bad==0); }
+    snprintf(nm,sizeof nm,"locked capture (start 100): %d points before the window",mv_nlo); check(nm, mv_nlo>=45 && mv_nlo<=50);
+    { float v=0; int ok=OscExtPoint(-1,&v); uint32_t c=100u-2u, lo=c-(w-1)/2; float want=(float)((adc_raw_buf[lo]+adc_raw_buf[lo+1])/w);
+      snprintf(nm,sizeof nm,"OscExtPoint(-1) = the boxcar just before the window (%.0f, expected %.0f)",v,want); check(nm, ok && v==want); }
+    { float v=0; check("OscExtPoint beyond the stored points: none", !OscExtPoint(-1-mv_nlo,&v)); }
+    { const uint32_t n2=(uint32_t)(N_SAMPLES*step)+w-1u; MvStoreExt(0, step, w, n2);
+      snprintf(nm,sizeof nm,"capture without extra data: nlo %d, nhi %d",mv_nlo,mv_nhi); check(nm, mv_nlo==0 && mv_nhi==0); }
   }
 
   /* ---- 7. F toggle / A auto ---- */
@@ -302,7 +244,6 @@ int main(void){
 }
 '''
 harness = harness.replace('@@FILL@@', macro('OSC_V_FILL_DIVS')).replace('@@DCDIVS@@', macro('OSC_V_DC_DIVS'))
-(OUT/'uart_dummy.c').write_text('')
 (OUT/'buttons.c').write_text(harness)
 # Button type + ButtonRepeat deps from the real file
 btn_t = src[src.index('typedef struct {\n    GPIO_TypeDef *port;'):src.index('} Button;')+len('} Button;')]
@@ -313,38 +254,6 @@ cc = subprocess.run(['clang', '-O0', '-Wno-everything', '-I', str(OUT), str(OUT/
 if cc.returncode:
     print(cc.stderr[:6000]); raise SystemExit(2)
 
-# ---- UartCommand compiled for real: key dispatch --------------------------------------------------------------------
-uart_h = r'''
-#include <stdio.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#define N_SAMPLES 240
-#define SCREEN_W 320
-static char log_[256]; static int panels;
-#define LOG(s) strcat(log_, s)
-static float osc_dc_shift_v; static int gen_wave, osc_calib=1; static float gen_freq=1000, gen_amp=0.5f, gen_dc=1.65f, gen_noise=0.05f, gen_ph; static uint8_t osc_dirty, osc_stable, hold_active, osc_cur_dirty; static int osc_sidx, osc_c1, osc_c2;
-static void OscSetIndex(int i){ char b[16]; snprintf(b,16,"S%d,",i); LOG(b); }
-static void ActUp(int n){ (void)n; LOG("UP,"); } static void ActDown(int n){ (void)n; LOG("DOWN,"); } static void ActFreeze(void){ LOG("FREEZE,"); }
-static void ActToggleMoveAxis(void){ LOG("AXIS,"); } static void ActMoveCenter(void){ LOG("ZERO,"); } static void ActToggleFastSlow(void){ LOG("FS,"); } static void ActAutoMode(void){ LOG("AUTOMODE,"); } static void ActAuto(void){ LOG("AUTO,"); } static void ActZoom(int d){ LOG(d>0?"ZIN,":"ZOUT,"); }
-static void OscAdjust(int d){ (void)d; LOG("ADJ,"); }
-static int OscClampI(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); } static float OscClampF(float v,float lo,float hi){ return v<lo?lo:(v>hi?hi:v); }
-static void UartPanel(void){ panels++; } static float UartArgF(const char*s,float d){ return s&&*s&&*s!='+'&&*s!='-'?(float)atof(s):d; }
-'''
-uart_main = r'''
-static void run(const char *l, const char *want){ char buf[24]; log_[0]=0; strcpy(buf,l); UartCommand(buf); if(strcmp(log_,want)){ printf("FAIL key \"%s\" -> \"%s\" (want \"%s\")\n",l,log_,want); failures++; } else printf("PASS key \"%s\" -> %s\n",l,*want?want:"(none)"); }
-int main(void){
-  run("h","FREEZE,"); run("r","FREEZE,"); run("z","AUTO,"); run("Z","AUTO,"); run("u","UP,"); run("d","DOWN,"); run("u 2","S2,"); run("x","AXIS,"); run("0","ZERO,"); run("F","FS,"); run("A","AUTOMODE,");
-  { float f0=gen_freq, a0=gen_amp; run("f 2000",""); run("a 1.0",""); printf("%s lower-case f/a still drive the generator (%.0f Hz, %.2f V)\n",(gen_freq==2000&&gen_amp==1.0f&&f0==1000&&a0==0.5f)?"PASS":"FAIL",gen_freq,gen_amp); if(!(gen_freq==2000&&gen_amp==1.0f)) failures++; }
-  printf("%s every key printed the panel (%d)\n",panels==13?"PASS":"FAIL",panels); if(panels!=13) failures++;
-  printf("uart failures=%d\n",failures); return failures?1:0; }
-'''
-(OUT/'uart_test.c').write_text(uart_h + 'static int failures;\n' + uc + '\n' + uart_main)
-cc = subprocess.run(['clang', '-O0', '-Wno-everything', str(OUT/'uart_test.c'), '-o', str(OUT/'uart_test'), '-lm'], capture_output=True, text=True)
-if cc.returncode:
-    print(cc.stderr[:4000]); raise SystemExit(2)
 r1 = subprocess.run([str(OUT/'buttons')], text=True, capture_output=True); print(r1.stdout, end='')
-r2 = subprocess.run([str(OUT/'uart_test')], text=True, capture_output=True); print(r2.stdout, end='')
 print('contract failures=%d' % cfail)
-raise SystemExit(bool(r1.returncode or r2.returncode or cfail))
+raise SystemExit(bool(r1.returncode or cfail))

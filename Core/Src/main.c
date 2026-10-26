@@ -24,7 +24,6 @@
 #include "rng.h"
 #include "spi.h"
 #include "tim.h"
-#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -99,11 +98,10 @@ int main(void)
   MX_RNG_Init();
   MX_SPI5_Init();
   MX_TIM1_Init();
-  MX_USART3_UART_Init();
   MX_I2C1_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-  AppInit();    /* app/app_main.c: ADC input, buttons, UART console, LCD */
+  AppInit();    /* app/app_main.c: ADC input, buttons, LCD */
   AppStart();   /* app/app_main.c: mutex, tasks, scheduler - never returns */
   /* USER CODE END 2 */
 

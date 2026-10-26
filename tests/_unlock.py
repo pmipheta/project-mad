@@ -6,8 +6,6 @@ def unlock(s):
     # v66b: undo the relocation of the one-shot start-up draws from vMainTask back into main() (v65 placement)
     a = s.find('    /* v66b: one-shot start-up'); b = s.index('    for (;;)', a) if a >= 0 else -1
     if a >= 0: s = s[:a] + s[b:]
-    s = s.replace('    /* v66b: UartPanel() moved to the start of OscTask (it reads osc_meas under the mutex; no Take before the scheduler) */\n',
-                  '    UartPanel();              /* \u0e41\u0e2a\u0e14\u0e07\u0e40\u0e21\u0e19\u0e39/\u0e2a\u0e16\u0e32\u0e19\u0e30\u0e04\u0e23\u0e31\u0e49\u0e07\u0e41\u0e23\u0e01\u0e2d\u0e2d\u0e01\u0e1e\u0e2d\u0e23\u0e4c\u0e15 serial */\n', 1)
     s = s.replace('    /* v66b: initial DrawGrid/DrawCursor/DrawTopPanel moved to the start of OscTask (DrawTopPanel locks the mutex) */\n',
                   '    DrawGrid();\n    DrawCursor();\n    DrawTopPanel();\n', 1)
     a = s.find('/* --- v66 step 3a:')

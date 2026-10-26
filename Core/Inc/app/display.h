@@ -4,7 +4,6 @@
 
 #include "app/app_config.h"
 
-int FindTrigger(void);
 void MapToScreen(int trig_offset);
 void DrawGrid(void);
 extern uint8_t cursors_on;

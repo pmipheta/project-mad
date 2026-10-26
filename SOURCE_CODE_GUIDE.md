@@ -5,7 +5,6 @@ input pin to the LCD. For a file-by-file and function-by-function reference, and
 for how to make common changes, see **`DEVELOPER_GUIDE.md`**. Read this together with:
 
 - `BUTTON_HARDWARE_MAP.md` — the 8 physical buttons, pins and wiring
-- `UART_input_commands.md` — every serial command
 - `RTOS_REFACTOR_STATUS.md` — FreeRTOS migration state and what is verified on hardware
 
 ---
@@ -17,7 +16,6 @@ for how to make common changes, see **`DEVELOPER_GUIDE.md`**. Read this together
 | MCU board | NUCLEO-F767ZI (Cortex-M7, SYSCLK 96 MHz from 8 MHz HSE) |
 | Display | ILI9341 320×240 SPI LCD (SPI5), landscape |
 | Signal input | **PA0 = ADC1_IN0** (Arduino A0). Range **0–3.3 V only** |
-| Serial | USART3 = ST-LINK virtual COM, 115200 baud |
 | Buttons | PB0–PB3, PA3, PC0, PC3, PF3 (active-LOW, internal pull-up) + PC13 blue user button (active-HIGH) |
 
 The input is AC-displayed: the trace is drawn around the signal's own mean, so a
@@ -35,7 +33,7 @@ sine of 1.65 V DC ± 1 V appears centred on the screen.
 | `Core/Src/stm32f7xx_it.c` | Interrupt handlers (CubeMX). `SysTick_Handler` USER CODE drives the SLOW sampler and the FreeRTOS tick |
 | `Core/Src/freertos_hooks.c` | `vApplicationStackOverflowHook` (required by `configCHECK_FOR_STACK_OVERFLOW = 2`) |
 | `Core/Src/ILI9341/` | LCD driver (pixels, rectangles, text) |
-| `Core/Src/gpio.c, spi.c, usart.c, tim.c, i2c.c, rng.c` | CubeMX-generated peripheral init |
+| `Core/Src/gpio.c, spi.c, tim.c, i2c.c, rng.c` | CubeMX-generated peripheral init |
 | `Core/Inc/FreeRTOSConfig.h` | Kernel configuration (1 kHz tick, 24 KB heap, mutexes on). Hand-written, CubeMX does not touch it |
 | `ThirdParty/FreeRTOS/` | FreeRTOS V11.1.0 kernel, vendored by hand (outside `Middlewares/`, which CubeMX manages) |
 | `Drivers/` | ST HAL + CMSIS |
@@ -50,15 +48,13 @@ sine of 1.65 V DC ± 1 V appears centred on the screen.
 | `osc_process` | offset/AC-DC, display filter, measurements (Vmax/Vmin/Vpp/RMS/F) |
 | `osc_timebase` | frame hold and the automatic FAST/SLOW time base |
 | `osc_settings` | setting menu (FILTER/TRIG/V/DIV/T/DIV, cursors), AutoScale request |
-| `osc_actions` | user actions `Act*`, MOVE/ZOOM of a frozen capture, AutoScale steps |
-| `move_view` | data behind MOVE/ZOOM (points outside the window, raw copy, panned view) |
+| `osc_actions` | user actions `Act*`, cursor readouts, AutoScale steps |
+| `ext_points` | the FAST display points just outside the window (real neighbours for the edge filter) |
 | `display` | LCD drawing: trace, grid, columns, cursors, setting bar, header |
 | `buttons` | debounce, hold-repeat, long press, mapping to actions |
-| `uart_console` | USART3 RX ring, status panel, command parser |
-| `osc_sim` | signal simulator (only with `ADC_INPUT_ENABLE = 0`) |
 | `osc_task` | **OscTask**: capture → process → draw → header, sleeps between deadlines |
-| `input_task` | **InputTask**: buttons + UART every 1 ms |
-| `app_main` | `AppInit()` (buttons GPIO, UART, LCD) and `AppStart()` (mutexes, tasks, scheduler) |
+| `input_task` | **InputTask**: buttons every 1 ms |
+| `app_main` | `AppInit()` (buttons GPIO, LCD) and `AppStart()` (mutexes, tasks, scheduler) |
 
 > **CubeMX Generate is safe.** Everything hand-written is either in `Core/Src/app`,
 > `ThirdParty/`, `FreeRTOSConfig.h`, `freertos_hooks.c` or inside `USER CODE` blocks.
@@ -76,17 +72,17 @@ sine of 1.65 V DC ± 1 V appears centred on the screen.
 ```
 main()  (CubeMX)
  ├─ HAL_Init, SystemClock_Config (96 MHz)
- ├─ MX_GPIO/DMA/RNG/SPI5/TIM1/USART3/I2C1/ADC1_Init
+ ├─ MX_GPIO/DMA/RNG/SPI5/TIM1/I2C1/ADC1_Init
  ├─ AppInit():  AdcInputInit (DWT, rate measurement, triple ADC), 8 button GPIOs,
- │              Button structs, UartInputInit, ILI9341_Init, clear screen
+ │              Button structs, ILI9341_Init, clear screen
  └─ AppStart(): xOscMutex + xAppLock, xTaskCreate(OscTask), xTaskCreate(InputTask),
                 vTaskStartScheduler()          <- never returns
 
 InputTask  (prio idle+2, 2048 words)           OscTask  (prio idle+1, 2048 words)
- ├─ wait until OscTask drew the start screen    ├─ once: UartPanel, DrawGrid, DrawCursor, DrawTopPanel
+ ├─ wait until OscTask drew the start screen    ├─ once: DrawGrid, DrawCursor, DrawTopPanel
  └─ every 1 ms:                                 └─ for (;;)
      APP_LOCK                                       APP_LOCK
-     HandleButtons(now), UartPoll()                 abort stale capture, C1/C2 fast repaint
+     HandleButtons(now)                             abort stale capture, C1/C2 fast repaint
      APP_UNLOCK                                     every FRAME_MS (33 ms): capture → process → measure → auto → draw
      wake OscTask                                   every HEADER_MS (300 ms): DrawTopPanel
                                                     APP_UNLOCK
@@ -104,7 +100,6 @@ Interrupts (never take the mutex):
 | ISR | Job |
 |---|---|
 | `SysTick_Handler` (1 kHz) | `HAL_IncTick()` always; `OscSlowTick()` (SLOW sampler); `xPortSysTickHandler()` only once the scheduler runs |
-| `USART3_IRQHandler` → `HAL_UART_RxCpltCallback` | puts each received byte in the 96-byte ring `uart_rx[]` |
 | `DMA2_Stream0_IRQHandler`, `ADC_IRQHandler` (CubeMX) → `HAL_ADC_ConvCpltCallback` / `HAL_ADC_ErrorCallback` | FAST capture completion |
 
 **Hardware lesson (v66–v71):** creating the mutex early in `main()` (before the
@@ -144,8 +139,8 @@ Inside `OscTask`, every 33 ms (if not frozen):
   level = mid-range, refined on a smoothed copy so noise does not move the edge.
 - Resampling: 240 display points from `start + i·step`, each a boxcar of `w` raw samples.
 - `MvStoreExt()` also keeps up to 256 points **just outside** the window
-  (`mv_ext_lo/hi`): used for X-pan when frozen and, since v76, as the real
-  neighbours of the filter at the screen edges.
+  (`mv_ext_lo/hi`, `ext_points.c`): since v76 the real neighbours of the filter
+  at the screen edges.
 - `AdcRawFrequency()` — frequency from regular edge spacing; refuses noise.
 - Pipelining: `AdcPrestart()` starts the next DMA capture while the current frame is drawn.
 
@@ -162,7 +157,7 @@ Inside `OscTask`, every 33 ms (if not frozen):
 
 ### FAST ↔ SLOW (AUTO time base) — `AUTO_TB_BEGIN =` block
 - FAST → SLOW below **70 Hz**, SLOW → FAST above **90 Hz** (hysteresis between).
-- Manual T/DIV, freeze and AUTO-scale pause it; UART `A` / PB3 long / PC13 long re-arm it.
+- Manual T/DIV, freeze and AUTO-scale pause it; PB3 long / PC13 long re-arm it.
 - Every switch is logged with a reason code (`dbg_atb_why`, `dbg_atb_log[]`).
 
 ---
@@ -185,26 +180,24 @@ Scales:
 
 ---
 
-## 7. Freeze, stable, zoom, cursors (`MOVE_BEGIN =` and `MOVE_DATA_BEGIN =` blocks)
+## 7. Freeze, stable, cursors (`ACTIONS_BEGIN` block)
 
 | Feature | Variable | What it does |
 |---|---|---|
-| FREEZE (PF3, UART `h`) | `hold_active` | stops capturing; enables cursors C1/C2, MOVE X/Y, zoom |
-| STABLE / trigger-lock (PC3 short, UART `m`) | `osc_stable` | keeps capturing live but aligns each frame on the trigger edge. FAST locks from **45 Hz** up (`osc_lock_auto`); SLOW locks whenever its history has a clean edge (v87) |
-| Zoom (`+`/`-` while frozen) | `mv_zoom_x/y` | X up to ×64, Y up to ×32, from the stored raw data (no invented detail) |
-| Pan | `mv_x_pts`, `mv_y_steps` | over the stored outside points / frozen SLOW history |
+| FREEZE (PF3) | `hold_active` | stops capturing; enables cursors C1/C2 |
+| STABLE / trigger-lock (PC3 short) | `osc_stable` | keeps capturing live but aligns each frame on the trigger edge. FAST locks from **45 Hz** up (`osc_lock_auto`); SLOW locks whenever its history has a clean edge (v87) |
 | Cursors | `osc_c1`, `osc_c2` | U1, U2, dV, dt in the header while frozen |
 
 ---
 
 ## 8. Controls
 
-Physical buttons are read in `HandleButtons()` and call the same `Act*()` functions
-as the UART commands, so both always behave identically.
+Physical buttons are read in `HandleButtons()`, which calls one `Act*()` function per
+button role. There is no serial console (removed in v97).
 
 | Button | Action |
 |---|---|
-| PB0 / PB1 | + / − on the selected setting (frozen: same, never moves the trace) |
+| PB0 / PB1 | + / − on the selected setting (running or frozen) |
 | PB2 | short: one-shot AUTO scale · hold 1.5 s: AC ↔ DC coupling |
 | PB3 | short: FAST↔SLOW (manual) · long: automatic FAST/SLOW again |
 | PA3 | select V/DIV ↔ T/DIV |
@@ -212,10 +205,6 @@ as the UART commands, so both always behave identically.
 | PC3 | short: STABLE on/off · hold 1.5 s while frozen: C1 ↔ C2 |
 | PF3 | FREEZE on/off |
 | PC13 (blue) | short: FAST↔SLOW · 1 s hold: AUTO again |
-
-UART: `UartPoll()` reads the ring buffer, `UartCommand()` dispatches
-(`s u d h x 0 + - F A z m v t f a o n w c g ?`), `UartPanel()` prints the status.
-Full list: `UART_input_commands.md`.
 
 ---
 
@@ -236,8 +225,8 @@ Two plain (non-recursive) mutexes:
 | Slow block writes | `SlowCaptureFrame` | its single call site is wrapped in the lock |
 
 Rules (checked by `tests/test_rtos_step3a.py`): no lock from any ISR, no nested
-`OSC_LOCK`, no UART/LCD/HAL call inside an `OSC_LOCK` section, nothing locks before the
-scheduler starts, `HandleButtons`/`UartPoll` only in InputTask, one `APP_LOCK` per pass.
+`OSC_LOCK`, no LCD/HAL call inside an `OSC_LOCK` section, nothing locks before the
+scheduler starts, `HandleButtons` only in InputTask, one `APP_LOCK` per pass.
 
 ---
 
@@ -260,8 +249,8 @@ older scripts print `FAIL` but exit 0). Needs `gcc`/`clang` and Python 3.
 | `test_hold.py` | frame-hold rules |
 | `test_draw.py` | column renderer, pixel-exact, incl. the T/DIV grid |
 | `test_edge_filter.py` | filter edges from 2.4 to 120 points/cycle |
-| `test_buttons.py`, `test_eightbtn.py`, `test_blink.py` | buttons, UART mapping, selection blink |
-| `test_realpic.py`, `test_zoom.py` | default picture, zoom/pan; plus "unchanged since vNN" contracts |
+| `test_buttons.py`, `test_eightbtn.py`, `test_blink.py` | buttons, AUTO scale, selection blink |
+| `test_realpic.py` | default picture, one-shot AUTO; plus "unchanged since vNN" contracts |
 | `test_vdiv_range.py` | V/DIV table 0.0001–2 V |
 | `test_rtos_step3a.py` | mutex rules (pre-scheduler, ISR, nesting) |
 
@@ -307,6 +296,7 @@ developer machine, not in git); those checks are skipped when the archive is abs
 | v94 | CubeMX owns ADC1/DMA (`adc.c`, `dma.c`); kernel moved to `ThirdParty/`; Generate is safe | verified (register A/B) |
 | v95 | OscTask + InputTask under the app lock; OscTask sleeps between deadlines | verified (frame rate A/B, HOLD idle 98 %) |
 | v96 | SLOW trigger edge 2 points from the left like FAST (was 10 %); readout keeps the old window | host tests; board: FAST only (no slow signal on the input) |
+| v97 | UART console and USART3 removed (also from the `.ioc`); frozen MOVE/ZOOM removed (`move_view` → `ext_points`, only the edge-filter points stay); simulator and `ADC_INPUT_ENABLE` removed. Flash −25 KB, RAM −146 KB | host tests; board: boots, FAST + SLOW frames, measurements. Buttons/LCD not checked |
 
 ## 13. Known limitations
 

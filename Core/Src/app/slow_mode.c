@@ -1,7 +1,6 @@
 /* slow_mode.c - SLOW mode: 1 kHz ADC3 history sampler and the SLOW frame builder. */
 #include "app/app.h"
 
-#if ADC_INPUT_ENABLE
 
 /* SLOW_BEGIN ================================================================
  * SLOW history: SysTick (1 kHz) reads ADC3 (burst of 16, averaged) ALL THE TIME, also while the display is in FAST mode.
@@ -494,4 +493,3 @@ void SlowCaptureFrame(void)
 }
 /* SLOW_END ================================================================= */
 
-#endif /* ADC_INPUT_ENABLE */

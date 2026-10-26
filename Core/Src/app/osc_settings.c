@@ -88,7 +88,7 @@ void OscAdjust(int dir)      /* dir = +1 / -1 */
 }
 
 
-/* One AutoScale state machine for UART z and long SET. Consume a fresh,
+/* One AutoScale state machine for the AUTO button. Consume a fresh,
  * valid capture only; frequency and amplitude come from the raw acquisition. */
 uint8_t osc_auto_stage = 0;
 uint8_t osc_auto_tries = 0;   /* frames without a valid frequency */
@@ -101,7 +101,6 @@ void OscAutoScale(void)
     /* v56: one-shot. 'z' does not touch osc_auto_tb (continuous auto time base only via 'A') */
     osc_auto_tries = 0;
     OSC_SET(osc_dirty, 1);
-    UartPrint("\r\n AutoScale...\r\n");
 }
 
 float SlowProbeFreq(int ti);          /* defined in the SLOW block */

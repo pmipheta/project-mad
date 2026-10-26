@@ -94,7 +94,7 @@ for m in wr_scalar.finditer(src):
     if in_slow(pos): n_slow.append((lineno(pos), owner_of(pos))); continue
     unprot.append((lineno(pos), line.strip()[:80]))   # a raw assignment survived outside OSC_SET
 n_ok = len([m for m in re.finditer(r'\bOSC_SET\(\s*(?:%s)\b' % '|'.join(SCALARS), src) if owner_of(m.start()) and not in_slow(m.start())])
-chk('(b) every non-Slow scalar write (osc_sidx/hold_active/osc_dirty/osc_stable/osc_auto_tb) goes through OSC_SET and no raw assignment survives (%d OSC_SET sites)' % n_ok, not unprot and n_ok >= 40, str(unprot))
+chk('(b) every non-Slow scalar write (osc_sidx/hold_active/osc_dirty/osc_stable/osc_auto_tb) goes through OSC_SET and no raw assignment survives (%d OSC_SET sites)' % n_ok, not unprot and n_ok >= 24, str(unprot))   # v97: >= 24 (was 40) - the UART console and MOVE/ZOOM writes were removed
 # osc_meas field/struct writes must sit between OSC_LOCK and OSC_UNLOCK in the same function
 wr_meas = re.compile(r'(?:osc_meas\s*\.\s*\w+|\(\(OscMeasure \*\)&osc_meas\)->\w+|(?<![\w.])osc_meas)\s*(?:=(?!=)|[-+*/]=)')
 bad_meas, n_meas = [], 0
@@ -106,9 +106,9 @@ for m in wr_meas.finditer(src):
     held = len(re.findall(r'\bOSC_LOCK\(\)', seg)) - len(re.findall(r'\bOSC_UNLOCK\(\)', seg))
     n_meas += 1
     if held != 1: bad_meas.append((lineno(pos), o))
-chk('(b) every non-Slow osc_meas write is inside OSC_LOCK..OSC_UNLOCK (%d sites)' % n_meas, not bad_meas and n_meas >= 15, str(bad_meas))
-# osc_meas reads that need a consistent multi-field snapshot use OscMeasGet (UartPanel + DrawTopPanel)
-for f in ('UartPanel', 'DrawTopPanel'):
+chk('(b) every non-Slow osc_meas write is inside OSC_LOCK..OSC_UNLOCK (%d sites)' % n_meas, not bad_meas and n_meas >= 11, str(bad_meas))   # v97: >= 11 (was 15) - the simulator writes were removed
+# osc_meas reads that need a consistent multi-field snapshot use OscMeasGet (DrawTopPanel)
+for f in ('DrawTopPanel',):
     chk('(b) %s reads osc_meas only through a OscMeasGet snapshot' % f, 'OscMeasGet(' in body(f) and 'osc_meas' not in body(f))
 # Slow block: its writes live in SlowCaptureFrame (task context) and the only call site is locked
 slow_owners = {o for _, o in n_slow}
@@ -165,7 +165,7 @@ chk('(c) a non-recursive mutex does not need to be recursive: SlowCaptureFrame c
 
 # (d) ISR safety
 # ADC_IRQHandler / DMA2_Stream0_IRQHandler are CubeMX code (stm32f7xx_it.c) that only call HAL; HAL calls back into these from the ISR:
-isr_roots = ['OscSlowTick', 'HAL_UART_RxCpltCallback', 'HAL_UART_ErrorCallback', 'USART3_IRQHandler', 'HAL_ADC_ConvCpltCallback', 'HAL_ADC_ErrorCallback']
+isr_roots = ['OscSlowTick', 'HAL_ADC_ConvCpltCallback', 'HAL_ADC_ErrorCallback']
 seen, todo = set(), list(isr_roots)
 while todo:
     n = todo.pop()
@@ -199,16 +199,16 @@ chk('(f) no mutex token anywhere in main() except the xSemaphoreCreateMutex crea
 chk('(f) init remains before mutex creation and no lock-taking function is called after creation but before scheduler start',
     ix('HdrInvalidate();') < ix('xSemaphoreCreateMutex') and not presched_violations(raw))
 chk('(f) OscTask owns the initial UI draw prologue after scheduler start',
-    all(k in body('OscTask')[:body('OscTask').index('for (;;)')] for k in ('UartPanel();', 'DrawGrid();', 'DrawCursor();', 'DrawTopPanel();')))
+    all(k in body('OscTask')[:body('OscTask').index('for (;;)')] for k in ('DrawGrid();', 'DrawCursor();', 'DrawTopPanel();')))
 
-# (g) v95 task split: InputTask = the old per-pass HandleButtons/UartPoll, under the app lock, between OscTask passes
+# (g) v95 task split: InputTask = the old per-pass HandleButtons, under the app lock, between OscTask passes
 ot, itk = body('OscTask'), body('InputTask')
 loop = ot[ot.index('for (;;)'):]
 chk('(g) InputTask waits for the start-up screen, then polls under the app lock and wakes OscTask',
-    re.search(r'ulTaskNotifyTake\(pdTRUE, portMAX_DELAY\);.*for \(;;\)\s*\{\s*APP_LOCK\(\);\s*HandleButtons\(HAL_GetTick\(\)\);\s*UartPoll\(\);\s*APP_UNLOCK\(\);'
+    re.search(r'ulTaskNotifyTake\(pdTRUE, portMAX_DELAY\);.*for \(;;\)\s*\{\s*APP_LOCK\(\);\s*HandleButtons\(HAL_GetTick\(\)\);\s*APP_UNLOCK\(\);'
               r'\s*xTaskNotifyGive\(osc_task_handle\);\s*vTaskDelay\(pdMS_TO_TICKS\(INPUT_POLL_MS\)\);\s*\}', itk, re.S) is not None)
 chk('(g) OscTask releases InputTask only after the start-up draw', ot.index('xTaskNotifyGive(input_task_handle);') > ot.index('DrawTopPanel();') and ot.index('xTaskNotifyGive(input_task_handle);') < ot.index('for (;;)'))
-chk('(g) HandleButtons / UartPoll are called only by InputTask', [n for n in fn if n != 'InputTask' and re.search(r'\b(HandleButtons|UartPoll)\s*\(', body(n))] == [])
+chk('(g) HandleButtons is called only by InputTask', [n for n in fn if n != 'InputTask' and re.search(r'\bHandleButtons\s*\(', body(n))] == [])
 chk('(g) one OscTask pass = APP_LOCK() .. APP_UNLOCK(), then the deadline sleep (no lock held while sleeping)',
     re.match(r'for \(;;\)\s*\{\s*APP_LOCK\(\);', loop) is not None and loop.count('APP_LOCK()') == 1 and loop.count('APP_UNLOCK()') == 1
     and loop.index('APP_UNLOCK()') < loop.index('ulTaskNotifyTake(') and not re.search(r'\b(return|continue)\b', loop))
