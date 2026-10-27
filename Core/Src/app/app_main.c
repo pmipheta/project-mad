@@ -1,15 +1,9 @@
-/* app_main.c - Application start-up: called from main() after the CubeMX peripheral init. */
 #include "app/app.h"
 
-/* Everything main() does after the CubeMX peripheral init: ADC input, buttons, LCD. */
 void AppInit(void)
 {
-    AdcInputInit();   /* p30: ADC1+PA0+DMA สำหรับอินพุตจริง */
+    AdcInputInit();
 
-
-    /* ปุ่ม PB0..PB3 = input + pull-up
-     * ชั่วคราว: gpio.c ที่ CubeMX generate ยังไม่ได้ config ขาเหล่านี้
-     * ของจริงควรตั้ง GPIO_Input + Pull-up ใน CubeMX แล้ว generate ใหม่     */
     {
         GPIO_InitTypeDef btn_init = {0};
         __HAL_RCC_GPIOB_CLK_ENABLE();
@@ -17,14 +11,12 @@ void AppInit(void)
         btn_init.Mode = GPIO_MODE_INPUT;
         btn_init.Pull = GPIO_PULLUP;
         HAL_GPIO_Init(GPIOB, &btn_init);
-        /* v61: four more buttons, same manual init (PA3, PC0, PC3, PF3) */
         __HAL_RCC_GPIOA_CLK_ENABLE(); __HAL_RCC_GPIOC_CLK_ENABLE(); __HAL_RCC_GPIOF_CLK_ENABLE();
         btn_init.Pin = BTN_VDIV_PIN;                  HAL_GPIO_Init(BTN_VDIV_PORT, &btn_init);
         btn_init.Pin = BTN_TDIV_PIN | BTN_FILT_PIN;   HAL_GPIO_Init(GPIOC, &btn_init);
         btn_init.Pin = BTN_TRIG_PIN;                  HAL_GPIO_Init(BTN_TRIG_PORT, &btn_init);
     }
 
-    /* Button struct init (done here to avoid static-initializer cast issue) */
     btn_up   = (Button){BTN_UP_PORT,   BTN_UP_PIN,   0, 0, 0, 0};
     btn_down = (Button){BTN_DOWN_PORT, BTN_DOWN_PIN, 0, 0, 0, 0};
     btn_hold = (Button){BTN_HOLD_PORT, BTN_HOLD_PIN, 0, 0, 0, 0};
@@ -34,14 +26,12 @@ void AppInit(void)
     btn_filt = (Button){BTN_FILT_PORT, BTN_FILT_PIN, 0, 0, 0, 0};
     btn_trig = (Button){BTN_TRIG_PORT, BTN_TRIG_PIN, 0, 0, 0, 0};
 
-    /* LCD init */
     ILI9341_Init();
     ILI9341_Set_Rotation(SCREEN_HORIZONTAL_1);
     ILI9341_Fill_Screen(BLACK);
     HdrInvalidate();
 
 #if SHOW_FPS
-    /* --- benchmark ครั้งเดียวตอนบูต: วัดต้นทุนต่อพิกเซลของแต่ละวิธี --------- */
     {
         uint32_t tb;
         uint8_t  two[2] = {0xAA, 0x55};
@@ -67,17 +57,13 @@ void AppInit(void)
     }
 #endif
 
-    /* Initial double-buffer state */
     for (int i = 0; i < N_SAMPLES; i++) old_y[i] = CENTER_Y;
-
-    /* v66b: initial DrawGrid/DrawCursor/DrawTopPanel moved to the start of OscTask (DrawTopPanel locks the mutex) */
 
 }
 
-SemaphoreHandle_t xAppLock;                          /* one task at a time works on the scope state + LCD (see app_main.h) */
+SemaphoreHandle_t xAppLock;
 TaskHandle_t osc_task_handle, input_task_handle;
 
-/* Creates the mutexes and the two tasks, then starts the scheduler (never returns). */
 void AppStart(void)
 {
     xOscMutex = xSemaphoreCreateMutex();
@@ -86,5 +72,5 @@ void AppStart(void)
     if (xTaskCreate(OscTask,   "Osc",   OSC_TASK_STACK,   NULL, OSC_TASK_PRIO,   &osc_task_handle)   != pdPASS ||
         xTaskCreate(InputTask, "Input", INPUT_TASK_STACK, NULL, INPUT_TASK_PRIO, &input_task_handle) != pdPASS)
         Error_Handler();
-    vTaskStartScheduler();   /* never returns */
+    vTaskStartScheduler();
 }

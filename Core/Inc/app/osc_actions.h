@@ -1,4 +1,3 @@
-/* osc_actions.h - User actions (Act*): freeze, auto, +/-, setting select, FAST/SLOW, cursor readouts, AutoScale steps. */
 #ifndef APP_OSC_ACTIONS_H
 #define APP_OSC_ACTIONS_H
 
@@ -20,4 +19,4 @@ void ActToggleFastSlow(void);
 void ActAutoMode(void);
 void OscAutoScaleStep(void);
 
-#endif /* APP_OSC_ACTIONS_H */
+#endif

@@ -1,4 +1,3 @@
-/* adc_capture.h - ADC input (PA0): DMA burst capture, rate levels, triple-ADC interleave, FAST frame capture. */
 #ifndef APP_ADC_CAPTURE_H
 #define APP_ADC_CAPTURE_H
 
@@ -18,4 +17,4 @@ void AdcAbortPending(void);
 void AdcPrestart(void);
 void AdcCaptureFrame(void);
 
-#endif /* APP_ADC_CAPTURE_H */
+#endif

@@ -1,4 +1,3 @@
-/* osc_state.h - Shared oscilloscope state: settings, measurement results, display buffers, the state mutex. */
 #ifndef APP_OSC_STATE_H
 #define APP_OSC_STATE_H
 
@@ -104,4 +103,4 @@ extern float adc_rough_ratio;
 extern uint32_t adc_over_t;
 extern int osc_plot_offset;
 
-#endif /* APP_OSC_STATE_H */
+#endif

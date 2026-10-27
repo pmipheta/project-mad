@@ -1,4 +1,3 @@
-/* osc_timebase.h - Frame hold (do not draw a known-bad frame) and the automatic FAST/SLOW time base. */
 #ifndef APP_OSC_TIMEBASE_H
 #define APP_OSC_TIMEBASE_H
 
@@ -13,4 +12,4 @@ void OscAutoTimebase(void);
 void OscManualToggle(void);
 void OscAutoRearm(void);
 
-#endif /* APP_OSC_TIMEBASE_H */
+#endif

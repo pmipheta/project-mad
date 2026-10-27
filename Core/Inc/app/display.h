@@ -1,4 +1,3 @@
-/* display.h - LCD drawing: trace mapping, grid, waveform columns, cursors, setting bar, header panel. */
 #ifndef APP_DISPLAY_H
 #define APP_DISPLAY_H
 
@@ -17,4 +16,4 @@ void HdrInvalidate(void);
 void DrawTopPanel(void);
 void DrawFps(float fps);
 
-#endif /* APP_DISPLAY_H */
+#endif

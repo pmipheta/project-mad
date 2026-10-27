@@ -101,8 +101,8 @@ int main(void)
   MX_I2C1_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-  AppInit();    /* app/app_main.c: ADC input, buttons, LCD */
-  AppStart();   /* app/app_main.c: mutex, tasks, scheduler - never returns */
+  AppInit();
+  AppStart();
   /* USER CODE END 2 */
 
   /* Infinite loop */
