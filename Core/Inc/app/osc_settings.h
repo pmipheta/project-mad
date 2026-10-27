@@ -1,4 +1,3 @@
-/* osc_settings.h - Setting menu (FILTER/TRIG/V/DIV/T/DIV, cursors) and the one-shot AutoScale request. */
 #ifndef APP_OSC_SETTINGS_H
 #define APP_OSC_SETTINGS_H
 
@@ -17,4 +16,4 @@ extern uint8_t osc_auto_tries;
 extern volatile float dbg_auto_fsel;
 void OscAutoScale(void);
 
-#endif /* APP_OSC_SETTINGS_H */
+#endif

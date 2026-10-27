@@ -164,8 +164,7 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
-  { extern void OscSlowTick(void); OscSlowTick(); }   /* SLOW mode sampler (1 kHz) */
-  /* FreeRTOS shares SysTick with the HAL tick: HAL_IncTick() above always runs; the kernel tick only once the scheduler runs */
+  { extern void OscSlowTick(void); OscSlowTick(); }
   { extern void xPortSysTickHandler(void); if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) { xPortSysTickHandler(); } }
 
   /* USER CODE END SysTick_IRQn 1 */

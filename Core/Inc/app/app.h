@@ -1,4 +1,3 @@
-/* app.h - every application module header (the modules share one state; see osc_state.h). */
 #ifndef APP_APP_H
 #define APP_APP_H
 
@@ -17,4 +16,4 @@
 #include "app/input_task.h"
 #include "app/app_main.h"
 
-#endif /* APP_APP_H */
+#endif
